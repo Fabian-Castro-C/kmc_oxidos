@@ -141,16 +141,24 @@ class Lattice:
         return self.sites[idx]
 
     def _update_surface_sites(self) -> None:
-        """Update the set of surface sites (sites available for deposition)."""
+        """Update the set of surface sites (vacant sites available for deposition)."""
         self.surface_sites.clear()
         for idx, site in enumerate(self.sites):
             _x, _y, z = site.position
-            # Skip substrate and check if site has a vacant neighbor above
-            if z > 0 and any(
-                self.sites[n_idx].species == SpeciesType.VACANT
-                and self.sites[n_idx].position[2] > z
+
+            if site.species != SpeciesType.VACANT:
+                continue
+
+            if z == 0:
+                continue
+
+            has_support = any(
+                self.sites[n_idx].species not in (SpeciesType.VACANT, None)
+                and self.sites[n_idx].position[2] <= z
                 for n_idx in site.neighbors
-            ):
+            )
+
+            if has_support:
                 self.surface_sites.add(idx)
 
     def deposit_atom(self, site_idx: int, species: SpeciesType) -> None:

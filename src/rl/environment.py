@@ -7,6 +7,7 @@ for reinforcement learning.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import gymnasium as gym
@@ -16,6 +17,8 @@ from gymnasium import spaces
 
 from ..kmc.lattice import SpeciesType
 from ..kmc.simulator import KMCSimulator
+
+logger = logging.getLogger(__name__)
 
 
 class TiO2GrowthEnv(gym.Env):  # type: ignore[misc]
@@ -67,20 +70,28 @@ class TiO2GrowthEnv(gym.Env):  # type: ignore[misc]
             deposition_rate=deposition_rate,
         )
 
-        # Define observation space: local neighborhood for each agent
-        # For simplicity, we use a flattened representation
-        # Each agent observes: species of 6 nearest neighbors + own species
-        n_neighbor_features = 7  # 6 neighbors + self
+        # Define observation space: global statistics
         self.observation_space = spaces.Box(
-            low=0, high=len(SpeciesType), shape=(n_neighbor_features,), dtype=np.int32
+            low=0,
+            high=np.inf,
+            shape=(7,),
+            dtype=np.int32,
         )
 
-        # Action space: select from available events
-        # We'll dynamically handle this, but define a large enough space
-        self.action_space = spaces.Discrete(1000)
+        # Action space with masking support
+        self.max_action_space = 1000
+        self.action_space = spaces.Discrete(self.max_action_space)
 
         self.current_step = 0
         self.episode_reward = 0.0
+
+    def action_masks(self) -> npt.NDArray[np.bool_]:
+        """Return mask of valid actions for current state."""
+        n_events = len(self.simulator.event_catalog)
+        mask = np.zeros(self.max_action_space, dtype=np.bool_)
+        if n_events > 0:
+            mask[:n_events] = True
+        return mask
 
     def reset(
         self,
@@ -100,64 +111,47 @@ class TiO2GrowthEnv(gym.Env):  # type: ignore[misc]
         """
         super().reset(seed=seed)
 
-        # Reset simulator
         self.simulator.reset()
         self.current_step = 0
         self.episode_reward = 0.0
 
-        # Build initial event list
-        self.simulator.build_event_list()
-
-        # Get initial observation
         obs = self._get_observation()
         info = self._get_info()
+        info["action_mask"] = self.action_masks()
 
         return obs, info
 
     def step(self, action: int) -> tuple[npt.NDArray[np.int32], float, bool, bool, dict[str, Any]]:
-        """
-        Execute one environment step.
-
-        Args:
-            action: Action index (event selection).
-
-        Returns:
-            Tuple of (observation, reward, terminated, truncated, info).
-        """
-        # Get event from catalog
-        if action >= len(self.simulator.event_catalog):
-            # Invalid action, penalize
+        """Execute one environment step with action masking support."""
+        if not self.action_masks()[action]:
             obs = self._get_observation()
-            return obs, -1.0, False, False, self._get_info()
+            info = self._get_info()
+            info["action_mask"] = self.action_masks()
+            info["invalid_action"] = True
+            return obs, -10.0, False, False, info
 
         event = self.simulator.event_catalog.events[action]
 
-        # Calculate energy change before event
         delta_e = self.simulator.rate_calculator.calculate_energy_change(
             self.simulator.lattice, event.site_index, event.target_index
         )
 
-        # Execute event
         self.simulator.execute_event(event)
         self.simulator.advance_time()
         self.simulator.step += 1
 
-        # Rebuild event list
-        self.simulator.build_event_list()
-
-        # Calculate reward (negative energy change)
         reward = -delta_e
         self.episode_reward += reward
 
-        # Get new observation
         obs = self._get_observation()
 
-        # Check termination
         self.current_step += 1
         terminated = self.current_step >= self.max_steps
         truncated = len(self.simulator.event_catalog) == 0
 
         info = self._get_info()
+        info["action_mask"] = self.action_masks()
+        info["invalid_action"] = False
 
         return obs, reward, terminated, truncated, info
 
@@ -201,7 +195,7 @@ class TiO2GrowthEnv(gym.Env):  # type: ignore[misc]
     def render(self) -> None:
         """Render the environment."""
         if self.render_mode == "human":
-            print(f"Step: {self.current_step}")
-            print(f"KMC Time: {self.simulator.time:.2e}s")
-            print(f"Composition: {self.simulator.lattice.get_composition()}")
-            print(f"Episode Reward: {self.episode_reward:.2f}")
+            logger.info(f"Step: {self.current_step}")
+            logger.info(f"KMC Time: {self.simulator.time:.2e}s")
+            logger.info(f"Composition: {self.simulator.lattice.get_composition()}")
+            logger.info(f"Episode Reward: {self.episode_reward:.2f}")

@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from ..data.tio2_parameters import TiO2Parameters, get_tio2_parameters
 from .lattice import SpeciesType
 
 if TYPE_CHECKING:
@@ -81,6 +82,7 @@ class RateCalculator:
         self,
         temperature: float,
         deposition_rate: float,
+        params: TiO2Parameters | None = None,
         k_boltzmann: float = 8.617333e-5,
     ) -> None:
         """
@@ -89,28 +91,35 @@ class RateCalculator:
         Args:
             temperature: System temperature (K).
             deposition_rate: Deposition rate (ML/s).
+            params: Physical parameters for TiO2. If None, uses default parameters.
             k_boltzmann: Boltzmann constant (eV/K).
         """
         self.temperature = temperature
         self.deposition_rate = deposition_rate
+        self.params = params if params is not None else get_tio2_parameters()
         self.k_boltzmann = k_boltzmann
 
-    def calculate_adsorption_rate(self, site: Site) -> float:
+    def calculate_adsorption_rate(self, site: Site, species: SpeciesType) -> float:
         """
-        Calculate adsorption rate.
-
-        The adsorption rate is proportional to the deposition flux and the
-        availability of the site.
+        Calculate adsorption rate for a specific species.
 
         Args:
             site: Target site for adsorption.
+            species: Species type (TI or O) to be adsorbed.
 
         Returns:
             Adsorption rate (Hz).
         """
-        # Base rate proportional to deposition flux
-        # Adjust based on site coordination (sticking probability)
-        sticking_coefficient = 1.0 - (site.coordination / 6.0) * 0.5
+        if species == SpeciesType.TI:
+            base_sticking = 0.90
+        elif species == SpeciesType.O:
+            base_sticking = 0.75
+        else:
+            base_sticking = 0.50
+
+        coordination_factor = 1.0 - (site.coordination / 6.0) * 0.3
+        sticking_coefficient = base_sticking * coordination_factor
+
         return self.deposition_rate * sticking_coefficient
 
     def calculate_diffusion_rate(

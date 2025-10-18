@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ..data.tio2_parameters import TiO2Parameters, get_tio2_parameters
+from .efficient_updates import initialize_all_events, update_events_after_execution
 from .events import Event, EventCatalog, EventType
 from .lattice import Lattice, SpeciesType
 from .rates import RateCalculator
@@ -42,6 +44,7 @@ class KMCSimulator:
         lattice_size: tuple[int, int, int],
         temperature: float,
         deposition_rate: float,
+        params: TiO2Parameters | None = None,
         seed: int | None = None,
     ) -> None:
         """
@@ -51,23 +54,27 @@ class KMCSimulator:
             lattice_size: Lattice dimensions (nx, ny, nz).
             temperature: Temperature (K).
             deposition_rate: Deposition rate (ML/s).
+            params: Physical parameters for TiO2. If None, uses default parameters.
             seed: Random seed for reproducibility.
         """
         if seed is not None:
             random.seed(seed)
             np.random.seed(seed)
 
+        self.params = params if params is not None else get_tio2_parameters()
+
         self.lattice = Lattice(size=lattice_size)
         self.rate_calculator = RateCalculator(
             temperature=temperature,
             deposition_rate=deposition_rate,
+            params=self.params,
         )
 
         self.event_catalog = EventCatalog()
         self.time = 0.0
         self.step = 0
+        self.event_map: dict[int, list[int]] = {}
 
-        # Statistics
         self.events_executed: dict[EventType, int] = dict.fromkeys(EventType, 0)
 
         logger.info(
@@ -89,7 +96,7 @@ class KMCSimulator:
             site = self.lattice.get_site_by_index(site_idx)
             if site.species == SpeciesType.VACANT:
                 # Ti adsorption
-                rate_ti = self.rate_calculator.calculate_adsorption_rate(site)
+                rate_ti = self.rate_calculator.calculate_adsorption_rate(site, SpeciesType.TI)
                 self.event_catalog.add_event(
                     Event(
                         event_type=EventType.ADSORPTION_TI,
@@ -100,7 +107,7 @@ class KMCSimulator:
                 )
 
                 # O adsorption
-                rate_o = self.rate_calculator.calculate_adsorption_rate(site)
+                rate_o = self.rate_calculator.calculate_adsorption_rate(site, SpeciesType.O)
                 self.event_catalog.add_event(
                     Event(
                         event_type=EventType.ADSORPTION_O,
@@ -116,15 +123,17 @@ class KMCSimulator:
             for neighbor_idx in site.neighbors:
                 neighbor = self.lattice.get_site_by_index(neighbor_idx)
                 if neighbor.species == SpeciesType.VACANT:
-                    # Determine diffusion event type
                     event_type = (
                         EventType.DIFFUSION_TI
                         if site.species == SpeciesType.TI
                         else EventType.DIFFUSION_O
                     )
 
-                    # Get activation energy (would come from parameters module)
-                    ea_diff = 0.6 if site.species == SpeciesType.TI else 0.8
+                    ea_diff = (
+                        self.params.ea_diff_ti
+                        if site.species == SpeciesType.TI
+                        else self.params.ea_diff_o
+                    )
 
                     rate = self.rate_calculator.calculate_diffusion_rate(
                         site, neighbor, activation_energy=ea_diff
@@ -140,13 +149,14 @@ class KMCSimulator:
                         )
                     )
 
-            # Desorption
             event_type = (
                 EventType.DESORPTION_TI
                 if site.species == SpeciesType.TI
                 else EventType.DESORPTION_O
             )
-            ea_des = 2.0 if site.species == SpeciesType.TI else 2.5
+            ea_des = (
+                self.params.ea_des_ti if site.species == SpeciesType.TI else self.params.ea_des_o
+            )
 
             rate = self.rate_calculator.calculate_desorption_rate(activation_energy=ea_des)
 
@@ -209,28 +219,17 @@ class KMCSimulator:
             self.time += dt
 
     def run_step(self) -> bool:
-        """
-        Execute one KMC step.
-
-        Returns:
-            True if step was executed, False if no events available.
-        """
-        # Build event list
-        self.build_event_list()
-
-        # Select event
+        """Execute one KMC step using efficient event updates."""
         event = self.select_event()
         if event is None:
             logger.warning("No events available, stopping simulation")
             return False
 
-        # Execute event
         self.execute_event(event)
 
-        # Advance time
-        self.advance_time()
+        update_events_after_execution(self, event)
 
-        # Increment step counter
+        self.advance_time()
         self.step += 1
 
         return True
@@ -294,7 +293,11 @@ class KMCSimulator:
         """Reset simulation to initial state."""
         self.lattice = Lattice(size=self.lattice.size)
         self.event_catalog.clear()
+        self.event_map.clear()
         self.time = 0.0
         self.step = 0
         self.events_executed = dict.fromkeys(EventType, 0)
+
+        initialize_all_events(self)
+
         logger.info("Simulator reset")
