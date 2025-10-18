@@ -1,6 +1,4 @@
 **Título:** Simulación Monte Carlo Cinético del Crecimiento de Películas Delgadas de Óxidos Metálicos: Escalamiento Dinámico y Morfología Fractal 
- **Autores:** Fabián Castro Contreras; Vicente Diaz; Marcos Flores; 
- **Afiliaciones:** ¹[Tu Afiliación Principal, Universidad/Institución, Chile]; ²[Afiliación Secundaria o de Coautor, si aplica] 
  **Resumen:** 
  Las películas delgadas de óxidos metálicos son fundamentales en nanotecnología, y el control de su nano/microestructura durante la deposición es clave para sus propiedades funcionales. Este trabajo propone un estudio computacional mediante Monte Carlo Cinético (KMC) clásico para investigar la evolución morfológica y el escalamiento dinámico durante el crecimiento de estas películas. 
  Se implementará un modelo KMC en red para simular la deposición de un óxido metálico genérico, considerando eventos atomísticos como deposición estocástica de especies constituyentes, difusión superficial y reacciones de formación del óxido, con tasas de Arrhenius. Las energías de activación se basarán en enfoques clásicos (potenciales interatómicos, conteo de enlaces, o datos previos experimentales/teóricos), sin cálculos DFT en el bucle KMC. 

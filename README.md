@@ -313,7 +313,6 @@ Este proyecto está bajo la Licencia MIT - ver el archivo `LICENSE` para detalle
 ## 📞 Contacto
 
 Para preguntas o colaboraciones:
-- Email: fabian@example.com
 - Issues: [GitHub Issues](https://github.com/tu-usuario/kmc_oxidos/issues)
 
 ---
