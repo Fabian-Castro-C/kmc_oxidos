@@ -72,3 +72,6 @@ site/
 # OS
 Thumbs.db
 .DS_Store
+
+# Papers
+docs/papers/
