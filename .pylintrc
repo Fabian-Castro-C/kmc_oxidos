@@ -1,0 +1,24 @@
+[MAIN]
+# Use multiple processes to speed up Pylint
+jobs = 0
+
+[MESSAGES CONTROL]
+# Disable specific warnings
+disable = 
+    C0114,
+    C0115,
+    C0116,
+    W1203,
+    E1101,
+    R0903,
+    R0913
+
+[FORMAT]
+max-line-length = 100
+
+[BASIC]
+good-names = i,j,k,x,y,z,t,dx,dy,dz,dt,ea,w,r,X,Y
+
+[DESIGN]
+max-args = 7
+max-locals = 20

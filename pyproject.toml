@@ -1,0 +1,117 @@
+[project]
+name = "kmc-oxidos"
+version = "0.1.0"
+description = "Simulación Monte Carlo Cinético del Crecimiento de Películas Delgadas de Óxidos Metálicos con Reinforcement Learning (SwarmThinkers)"
+authors = [
+    { name = "Fabián Castro Contreras", email = "fabian@example.com" },
+    { name = "Vicente Diaz", email = "vicente@example.com" },
+    { name = "Marcos Flores", email = "marcos@example.com" },
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = [
+    "kinetic-monte-carlo",
+    "reinforcement-learning",
+    "thin-films",
+    "metal-oxides",
+    "materials-science",
+]
+dependencies = [
+    "ase>=3.26.0",
+    "gymnasium>=1.2.1",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "pydantic>=2.12.3",
+    "pydantic-settings>=2.11.0",
+    "python-dotenv>=1.1.1",
+    "rich>=14.2.0",
+    "scikit-image>=0.25.2",
+    "scipy>=1.16.2",
+    "stable-baselines3>=2.7.0",
+    "torch>=2.9.0",
+    "tqdm>=4.67.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipython>=9.6.0",
+    "jupyter>=1.1.1",
+    "jupyterlab>=4.4.9",
+    "mypy>=1.18.2",
+    "ruff>=0.14.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ARG", # flake8-unused-arguments
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501", # line too long (handled by formatter)
+    "B008", # do not perform function calls in argument defaults
+    "B905", # zip() without strict parameter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_calls = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "stable_baselines3.*",
+    "gymnasium.*",
+    "torch.*",
+    "scipy.*",
+    "sklearn.*",
+    "ase.*",
+]
+ignore_missing_imports = true
+
+[tool.pylint.main]
+jobs = 0
+
+[tool.pylint.messages_control]
+disable = ["C0114", "C0115", "C0116", "W1203", "E1101", "R0903", "R0913"]
+
+[tool.pylint.format]
+max-line-length = 100
