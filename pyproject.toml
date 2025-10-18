@@ -2,11 +2,6 @@
 name = "kmc-oxidos"
 version = "0.1.0"
 description = "Simulación Monte Carlo Cinético del Crecimiento de Películas Delgadas de Óxidos Metálicos con Reinforcement Learning (SwarmThinkers)"
-authors = [
-    { name = "Fabián Castro Contreras", email = "fabian@example.com" },
-    { name = "Vicente Diaz", email = "vicente@example.com" },
-    { name = "Marcos Flores", email = "marcos@example.com" },
-]
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
