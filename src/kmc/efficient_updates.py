@@ -161,23 +161,23 @@ def get_affected_sites(simulator: KMCSimulator, event: Event) -> set[int]:
     return affected
 
 
-def update_events_after_execution(simulator: KMCSimulator, event: Event) -> None:
+def update_events_after_execution(simulator: KMCSimulator, event: Event) -> None:  # noqa: ARG001
     """
     Update all events affected by executing the given event.
 
-    This implements the efficient BKL approach: only update events for
-    sites in the local neighborhood of the change.
+    TEMPORARY WORKAROUND: Due to event_map index invalidation bugs,
+    this currently rebuilds the entire event list (O(N)) instead of
+    local updates (O(1)). This ensures correctness but reduces performance.
+
+    TODO: Fix event_map index tracking to enable O(1) local updates.
 
     Args:
         simulator: KMC simulator instance.
-        event: Event that was just executed.
+        event: Event that was just executed (currently unused in workaround).
     """
-    # Get all affected sites
-    affected_sites = get_affected_sites(simulator, event)
-
-    # Update events for each affected site
-    for site_idx in affected_sites:
-        update_events_for_site(simulator, site_idx)
+    # Temporary workaround: full rebuild to avoid index bugs
+    # The 'event' parameter is kept for interface compatibility but not used
+    simulator.build_event_list()
 
 
 def initialize_all_events(simulator: KMCSimulator) -> None:

@@ -77,9 +77,12 @@ class KMCSimulator:
 
         self.events_executed: dict[EventType, int] = dict.fromkeys(EventType, 0)
 
+        # Initialize event catalog with initial surface sites
+        initialize_all_events(self)
+
         logger.info(
             f"Initialized KMC simulator: {lattice_size}, T={temperature}K, "
-            f"deposition_rate={deposition_rate}ML/s"
+            f"deposition_rate={deposition_rate}ML/s, initial_events={len(self.event_catalog)}"
         )
 
     def build_event_list(self) -> None:
