@@ -39,6 +39,7 @@ class Event:
         rate: Event rate (Hz).
         species: Species involved in the event.
         delta_energy: Energy change from this event (eV).
+        reaction_partners: List of site indices involved in reaction (for multi-atom reactions).
     """
 
     event_type: EventType
@@ -47,9 +48,17 @@ class Event:
     rate: float = 0.0
     species: SpeciesType | None = None
     delta_energy: float = 0.0
+    reaction_partners: list[int] | None = None
 
     def __repr__(self) -> str:
         """String representation."""
+        if self.reaction_partners:
+            partners_str = ",".join(str(p) for p in self.reaction_partners)
+            return (
+                f"Event({self.event_type.value}, "
+                f"site={self.site_index}+[{partners_str}], "
+                f"rate={self.rate:.2e})"
+            )
         if self.target_index is not None:
             return (
                 f"Event({self.event_type.value}, "

@@ -38,6 +38,9 @@ class Site:
         coordination: Number of occupied nearest neighbors.
         energy: Local energy of the site (eV).
         neighbors: List of neighboring site indices.
+        bonded_to: List of site indices that this site is chemically bonded to.
+        is_in_oxide: Flag indicating if this atom is part of a formed TiO2 molecule.
+        site_id: Unique identifier for this site (for tracking purposes only).
     """
 
     position: tuple[int, int, int]
@@ -45,6 +48,9 @@ class Site:
     coordination: int = 0
     energy: float = 0.0
     neighbors: list[int] = field(default_factory=list)
+    bonded_to: list[int] = field(default_factory=list)
+    is_in_oxide: bool = False
+    site_id: int | None = None
 
     def is_occupied(self) -> bool:
         """Check if site is occupied by an atom."""
@@ -53,6 +59,10 @@ class Site:
     def is_surface(self) -> bool:
         """Check if site is on the surface (has vacant neighbors above)."""
         return self.coordination < 6  # For simple cubic lattice
+    
+    def is_bonded(self) -> bool:
+        """Check if site is chemically bonded to other atoms."""
+        return len(self.bonded_to) > 0
 
 
 class Lattice:
@@ -91,15 +101,17 @@ class Lattice:
         self._update_surface_sites()
 
     def _initialize_sites(self) -> None:
-        """Initialize all lattice sites."""
+        """Initialize all lattice sites with unique IDs."""
+        site_id = 0
         for iz in range(self.nz):
             for iy in range(self.ny):
                 for ix in range(self.nx):
                     position = (ix, iy, iz)
                     # Bottom layer is substrate
                     species = SpeciesType.SUBSTRATE if iz == 0 else SpeciesType.VACANT
-                    site = Site(position=position, species=species)
+                    site = Site(position=position, species=species, site_id=site_id)
                     self.sites.append(site)
+                    site_id += 1
 
     def _build_neighbor_lists(self) -> None:
         """Build nearest neighbor lists for all sites (simple cubic)."""
@@ -273,6 +285,61 @@ class Lattice:
         for idx, site in enumerate(self.sites):
             if site.is_occupied():
                 yield idx, site
+
+    def create_bond(self, site_idx1: int, site_idx2: int) -> None:
+        """
+        Create a chemical bond between two sites.
+
+        Args:
+            site_idx1: Index of first site.
+            site_idx2: Index of second site.
+        """
+        site1 = self.sites[site_idx1]
+        site2 = self.sites[site_idx2]
+
+        # Add bidirectional bond if not already present
+        if site_idx2 not in site1.bonded_to:
+            site1.bonded_to.append(site_idx2)
+        if site_idx1 not in site2.bonded_to:
+            site2.bonded_to.append(site_idx1)
+
+    def break_bond(self, site_idx1: int, site_idx2: int) -> None:
+        """
+        Break a chemical bond between two sites.
+
+        Args:
+            site_idx1: Index of first site.
+            site_idx2: Index of second site.
+        """
+        site1 = self.sites[site_idx1]
+        site2 = self.sites[site_idx2]
+
+        # Remove bidirectional bond
+        if site_idx2 in site1.bonded_to:
+            site1.bonded_to.remove(site_idx2)
+        if site_idx1 in site2.bonded_to:
+            site2.bonded_to.remove(site_idx1)
+
+    def get_bonded_neighbors(self, site_idx: int, species_filter: SpeciesType | None = None) -> list[int]:
+        """
+        Get list of neighboring sites that could form bonds.
+
+        Args:
+            site_idx: Index of the site.
+            species_filter: If provided, only return neighbors of this species.
+
+        Returns:
+            List of neighboring site indices.
+        """
+        site = self.sites[site_idx]
+        candidates = []
+
+        for neighbor_idx in site.neighbors:
+            neighbor = self.sites[neighbor_idx]
+            if neighbor.is_occupied() and (species_filter is None or neighbor.species == species_filter):
+                candidates.append(neighbor_idx)
+
+        return candidates
 
     def __repr__(self) -> str:
         """String representation."""
