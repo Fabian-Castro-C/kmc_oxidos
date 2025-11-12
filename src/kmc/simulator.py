@@ -192,13 +192,69 @@ class KMCSimulator:
             else:
                 n_des_o += 1
 
+        # Add reaction events (Ti + 2O -> TiO2)
+        n_reactions = self._detect_and_add_reaction_events()
+
         # DEBUG logging
         logger.debug(
             f"build_event_list: ads_Ti={n_ads_ti}, ads_O={n_ads_o}, "
             f"diff_Ti={n_diff_ti}, diff_O={n_diff_o}, "
             f"des_Ti={n_des_ti}, des_O={n_des_o}, "
+            f"reactions={n_reactions}, "
             f"total_events={len(self.event_catalog)}, total_rate={self.event_catalog.total_rate:.6e}"
         )
+
+    def _detect_and_add_reaction_events(self) -> int:
+        """
+        Detect possible TiO2 formation reactions and add them to event catalog.
+
+        For each Ti atom, check if it has at least 2 O neighbors.
+        If yes, create a reaction event Ti + 2O -> TiO2.
+
+        Returns:
+            Number of reaction events added.
+        """
+        n_reactions = 0
+
+        # Iterate over all occupied sites looking for Ti atoms
+        for site_idx, site in self.lattice.iter_occupied_sites():
+            if site.species != SpeciesType.TI:
+                continue
+
+            # Skip if this Ti is already part of an oxide
+            if site.is_in_oxide:
+                continue
+
+            # Find O neighbors that are not already bonded
+            o_neighbors = []
+            for neighbor_idx in site.neighbors:
+                neighbor = self.lattice.get_site_by_index(neighbor_idx)
+                if neighbor.species == SpeciesType.O and not neighbor.is_in_oxide:
+                    o_neighbors.append(neighbor_idx)
+
+            # Need at least 2 O atoms to form TiO2
+            if len(o_neighbors) >= 2:
+                # Calculate reaction rate
+                rate = self.rate_calculator.calculate_tio2_formation_rate(
+                    self.lattice, site_idx, o_neighbors
+                )
+
+                if rate is not None and rate > 0:
+                    # Create reaction event with the Ti site and first 2 O neighbors
+                    reaction_partners = o_neighbors[:2]
+
+                    self.event_catalog.add_event(
+                        Event(
+                            event_type=EventType.REACTION_TIO2,
+                            site_index=site_idx,
+                            rate=rate,
+                            species=SpeciesType.TI,
+                            reaction_partners=reaction_partners,
+                        )
+                    )
+                    n_reactions += 1
+
+        return n_reactions
 
     def select_event(self) -> Event | None:
         """
@@ -240,8 +296,61 @@ class KMCSimulator:
             # Remove atom
             self.lattice.remove_atom(event.site_index)
 
+        elif event.event_type == EventType.REACTION_TIO2:
+            # Form TiO2 molecule
+            self._execute_reaction_tio2(event)
+
         # Update statistics
         self.events_executed[event.event_type] += 1
+
+    def _execute_reaction_tio2(self, event: Event) -> None:
+        """
+        Execute TiO2 formation reaction: Ti + 2O -> TiO2.
+
+        Parameters
+        ----------
+        event : Event
+            Reaction event with reaction_partners containing O indices
+        """
+        if not event.reaction_partners or len(event.reaction_partners) < 2:
+            logger.warning(
+                f"Reaction event at site {event.site_index} lacks required "
+                f"reaction partners (need 2 O atoms)"
+            )
+            return
+
+        ti_idx = event.site_index
+        o_idx1 = event.reaction_partners[0]
+        o_idx2 = event.reaction_partners[1]
+
+        # Verify atoms still exist and are correct species
+        ti_site = self.lattice.sites[ti_idx]
+        o_site1 = self.lattice.sites[o_idx1]
+        o_site2 = self.lattice.sites[o_idx2]
+
+        if ti_site.species != SpeciesType.TI:
+            logger.warning(f"Expected Ti at {ti_idx}, found {ti_site.species}")
+            return
+        if o_site1.species != SpeciesType.O or o_site2.species != SpeciesType.O:
+            logger.warning(
+                f"Expected O atoms at {o_idx1}, {o_idx2}, "
+                f"found {o_site1.species}, {o_site2.species}"
+            )
+            return
+
+        # Mark atoms as part of TiO2 oxide
+        ti_site.is_in_oxide = True
+        o_site1.is_in_oxide = True
+        o_site2.is_in_oxide = True
+
+        # Create chemical bonds
+        self.lattice.create_bond(ti_idx, o_idx1)
+        self.lattice.create_bond(ti_idx, o_idx2)
+
+        logger.debug(
+            f"TiO2 formed: Ti@{ti_idx} + O@{o_idx1},{o_idx2} "
+            f"(t={self.time:.6e}s)"
+        )
 
     def advance_time(self) -> None:
         """Advance simulation time using BKL algorithm."""

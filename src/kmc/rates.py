@@ -136,6 +136,8 @@ class RateCalculator:
         Calculate diffusion rate using Arrhenius equation.
 
         The activation energy may depend on local coordination.
+        Atoms that are part of TiO2 molecules (bonded) have much
+        higher diffusion barriers.
 
         Args:
             site: Source site.
@@ -152,6 +154,11 @@ class RateCalculator:
         target_factor = target_site.coordination / 6.0
         effective_ea = activation_energy * (0.7 + 0.3 * coordination_factor + 0.1 * target_factor)
 
+        # Bonded atoms (part of TiO2) diffuse much slower
+        if site.is_in_oxide:
+            # TiO2 molecules are much more stable, increase barrier by 3x
+            effective_ea *= 3.0
+
         arrhenius = ArrheniusRate(
             attempt_frequency=attempt_frequency,
             activation_energy=effective_ea,
@@ -166,8 +173,8 @@ class RateCalculator:
         if self._debug_count < 3:
             logger.debug(
                 f"calc_diffusion_rate: species={site.species}, coord={site.coordination}, "
-                f"target_coord={target_site.coordination}, ea_base={activation_energy:.3f}, "
-                f"ea_eff={effective_ea:.4f}, rate={rate:.6e} Hz"
+                f"target_coord={target_site.coordination}, in_oxide={site.is_in_oxide}, "
+                f"ea_base={activation_energy:.3f}, ea_eff={effective_ea:.4f}, rate={rate:.6e} Hz"
             )
             self._debug_count += 1
 
