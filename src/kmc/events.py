@@ -22,7 +22,7 @@ class EventType(Enum):
     ADSORPTION_O = "adsorption_o"  # O atom adsorption
     DIFFUSION_TI = "diffusion_ti"  # Ti atom diffusion
     DIFFUSION_O = "diffusion_o"  # O atom diffusion
-    REACTION_TIO2 = "reaction_tio2"  # Ti + 2O → TiO2 formation
+    REACTION_TIO2 = "reaction_tio2"  # Ti + 2O -> TiO2 formation
     DESORPTION_TI = "desorption_ti"  # Ti atom desorption
     DESORPTION_O = "desorption_o"  # O atom desorption
 

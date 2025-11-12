@@ -13,7 +13,6 @@ Output: Logs, metrics JSON, and plots in experiments/results/validate_kmc_basic/
 
 import argparse
 import json
-import logging
 import sys
 import time
 from datetime import datetime
@@ -31,12 +30,8 @@ from src.kmc.lattice import SpeciesType
 from src.kmc.simulator import KMCSimulator
 from src.settings import settings
 
-# Setup logging with DEBUG level for investigation
+# Setup logging from settings (.env file)
 logger = settings.setup_logging()
-logger.setLevel("DEBUG")
-logging.getLogger("src.kmc.efficient_updates").setLevel(logging.DEBUG)
-logging.getLogger("src.kmc.simulator").setLevel(logging.DEBUG)
-logging.getLogger("src.kmc.rates").setLevel(logging.DEBUG)
 
 
 class ExperimentConfig:
@@ -274,7 +269,7 @@ class ExperimentResults:
         plt.savefig(self.output_dir / "plot_04_height_profile_final.png", dpi=150)
         plt.close()
 
-        logger.info("✅ All plots generated successfully")
+        logger.info("[OK] All plots generated successfully")
 
     def save_results(self):
         """Save all results to JSON files."""
@@ -311,7 +306,7 @@ class ExperimentResults:
         with open(timeseries_path, "w") as f:
             json.dump(timeseries, f, indent=2)
 
-        logger.info(f"✅ Results saved to {self.output_dir}")
+        logger.info(f"[OK] Results saved to {self.output_dir}")
 
         return metrics
 
@@ -389,8 +384,8 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
 
     if results.final_metrics["scaling_exponents"]["alpha"] is not None:
         logger.info(
-            f"Scaling exponents: α={results.final_metrics['scaling_exponents']['alpha']:.3f}, "
-            f"β={results.final_metrics['scaling_exponents']['beta']:.3f}"
+            f"Scaling exponents: alpha={results.final_metrics['scaling_exponents']['alpha']:.3f}, "
+            f"beta={results.final_metrics['scaling_exponents']['beta']:.3f}"
         )
 
     # Log validation status
@@ -400,17 +395,17 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
     for check_name, check_result in results.validation_status.items():
         if check_name.startswith("_"):
             continue  # Skip internal keys
-        status_symbol = "✅" if check_result else "❌"
+        status_symbol = "[PASS]" if check_result else "[FAIL]"
         logger.info(f"{status_symbol} {check_name}: {check_result}")
 
     overall_pass = results.validation_status.get("_overall_pass", False)
     if overall_pass:
         logger.info("=" * 80)
-        logger.info("🎉 VALIDATION: PASS - All critical checks passed!")
+        logger.info("VALIDATION: PASS - All critical checks passed!")
         logger.info("=" * 80)
     else:
         logger.warning("=" * 80)
-        logger.warning("⚠️  VALIDATION: FAIL - Some checks did not pass")
+        logger.warning("VALIDATION: FAIL - Some checks did not pass")
         logger.warning("=" * 80)
 
     # Generate plots
@@ -485,10 +480,10 @@ def main():
 
     # Exit with appropriate code
     if results.validation_status.get("_overall_pass", False):
-        logger.info("✅ Experiment completed successfully")
+        logger.info("[OK] Experiment completed successfully")
         return 0
     else:
-        logger.error("❌ Experiment failed validation")
+        logger.error("[FAIL] Experiment failed validation")
         return 1
 
 

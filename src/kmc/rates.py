@@ -146,7 +146,7 @@ class RateCalculator:
         Returns:
             Diffusion rate (Hz).
         """
-        # Lower coordination → easier diffusion
+        # Lower coordination -> easier diffusion
         coordination_factor = site.coordination / 6.0
         # Target site coordination affects barrier (higher target coordination = harder to hop into)
         target_factor = target_site.coordination / 6.0
@@ -179,7 +179,7 @@ class RateCalculator:
         attempt_frequency: float = 1e13,
     ) -> float:
         """
-        Calculate reaction rate (e.g., Ti + 2O → TiO2).
+        Calculate reaction rate (e.g., Ti + 2O -> TiO2).
 
         Args:
             activation_energy: Activation energy (eV).

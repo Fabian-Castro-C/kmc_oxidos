@@ -98,7 +98,7 @@ def get_tio2_parameters() -> TiO2Parameters:
 RUTILE_110_PARAMETERS = TiO2Parameters()
 
 RUTILE_100_PARAMETERS = TiO2Parameters(
-    ea_diff_ti=0.7,  # Different surface → different barriers
+    ea_diff_ti=0.7,  # Different surface -> different barriers
     ea_diff_o=0.9,
     ea_des_ti=2.2,
     ea_des_o=2.7,
@@ -147,7 +147,7 @@ def get_effective_diffusion_barrier(
     """
     Calculate effective diffusion barrier based on local coordination.
 
-    Lower coordination → easier diffusion.
+    Lower coordination -> easier diffusion.
 
     Args:
         base_barrier: Base activation energy (eV).
@@ -168,7 +168,7 @@ def get_effective_desorption_barrier(
     """
     Calculate effective desorption barrier based on local coordination.
 
-    Higher coordination → harder to desorb.
+    Higher coordination -> harder to desorb.
 
     Args:
         base_barrier: Base activation energy (eV).
