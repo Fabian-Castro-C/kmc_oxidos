@@ -195,6 +195,10 @@ class KMCSimulator:
         # Add reaction events (Ti + 2O -> TiO2)
         n_reactions = self._detect_and_add_reaction_events()
 
+        # Log if reactions detected (temporary debug)
+        if n_reactions > 0:
+            logger.info(f"Detected {n_reactions} possible TiO2 reactions at step {self.step}")
+
         # DEBUG logging
         logger.debug(
             f"build_event_list: ads_Ti={n_ads_ti}, ads_O={n_ads_o}, "
@@ -441,3 +445,13 @@ class KMCSimulator:
         initialize_all_events(self)
 
         logger.info("Simulator reset")
+
+    def print_event_statistics(self) -> None:
+        """Print summary of all executed events."""
+        logger.info("Event execution statistics:")
+        total_events = sum(self.events_executed.values())
+        for event_type, count in self.events_executed.items():
+            if count > 0:
+                pct = 100.0 * count / total_events if total_events > 0 else 0.0
+                logger.info(f"  {event_type.value}: {count} ({pct:.1f}%)")
+        logger.info(f"  Total events: {total_events}")

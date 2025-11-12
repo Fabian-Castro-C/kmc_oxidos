@@ -388,6 +388,11 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
             f"beta={results.final_metrics['scaling_exponents']['beta']:.3f}"
         )
 
+    # Print event statistics
+    logger.info("=" * 80)
+    sim.print_event_statistics()
+    logger.info("=" * 80)
+
     # Log validation status
     logger.info("=" * 80)
     logger.info("VALIDATION CHECKS")
