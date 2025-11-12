@@ -376,15 +376,33 @@ class ExperimentResults:
         snapshots_dir = self.output_dir / "snapshots"
         snapshots_dir.mkdir(exist_ok=True)
 
+        # Create gwyddion directory for GSF files
+        gwyddion_dir = self.output_dir / "gwyddion"
+        gwyddion_dir.mkdir(exist_ok=True)
+
         # Find global min/max for consistent colorbar
         all_heights = np.concatenate([h.flatten() for h in self.height_profiles])
         vmin, vmax = float(all_heights.min()), float(all_heights.max())
+
+        # Get lattice parameters for physical units
+        lattice_constant = 4.59  # Angstroms for TiO2 rutile
 
         for i, height_profile in enumerate(self.height_profiles):
             step = self.steps[i]
             time_s = self.times[i]
             roughness = self.roughnesses[i]
             coverage = self.coverages[i]
+
+            # Export to GSF format for Gwyddion
+            self._export_to_gsf(
+                height_profile,
+                gwyddion_dir / f"snapshot_{step:06d}.gsf",
+                lattice_constant,
+                step,
+                time_s,
+                roughness,
+                coverage
+            )
 
             # Create figure with 2 subplots: height profile and metrics
             fig = plt.figure(figsize=(14, 6))
@@ -453,8 +471,56 @@ Scaling Exponents:
             plt.close()
 
         logger.info(f"[OK] {len(self.height_profiles)} frames saved to {snapshots_dir}/")
+        logger.info(f"[OK] {len(self.height_profiles)} GSF files saved to {gwyddion_dir}/")
         logger.info("[INFO] To create a movie, use:")
         logger.info(f"  ffmpeg -framerate 2 -i {snapshots_dir}/frame_%04d.png -c:v libx264 -pix_fmt yuv420p {self.output_dir}/movie.mp4")
+
+    def _export_to_gsf(self, height_profile, output_path, lattice_constant, step, time_s, roughness, coverage):
+        """
+        Export height profile to GSF (GXSM Simple Field) format for Gwyddion.
+
+        GSF format specification:
+        - Text-based header with metadata
+        - Binary data section with height values
+        - Widely supported by Gwyddion and other SPM software
+        """
+        ny, nx = height_profile.shape
+
+        # Physical dimensions in nanometers
+        xreal = nx * lattice_constant / 10.0  # Convert Angstrom to nm
+        yreal = ny * lattice_constant / 10.0
+
+        # Convert height from layers to physical units (Angstrom)
+        height_angstrom = height_profile * lattice_constant
+
+        # Write GSF file
+        with open(output_path, 'wb') as f:
+            # Write ASCII header
+            header = f"""Gwyddion Simple Field 1.0
+XRes = {nx}
+YRes = {ny}
+XReal = {xreal:.6e}
+YReal = {yreal:.6e}
+XOffset = 0.000000e+00
+YOffset = 0.000000e+00
+Title = KMC TiO2 Growth - Step {step}
+XYUnits = nm
+ZUnits = Angstrom
+# Simulation metadata
+# Step: {step}
+# Time: {time_s:.6e} s
+# Roughness: {roughness:.6f} Angstrom
+# Coverage: {coverage:.6f} ML
+# Lattice constant: {lattice_constant} Angstrom
+\\0"""
+
+            # Write header as bytes
+            f.write(header.encode('ascii'))
+
+            # Write binary data (4-byte floats, little-endian)
+            # GSF expects row-major order (y varies fastest)
+            height_flat = height_angstrom.astype('<f4').tobytes()
+            f.write(height_flat)
 
     def save_results(self):
         """Save all results to JSON files."""
