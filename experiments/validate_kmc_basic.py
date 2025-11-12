@@ -120,6 +120,9 @@ class ExperimentResults:
 
     def compute_final_metrics(self, sim: KMCSimulator, duration_s: float):
         """Compute final metrics and validation checks."""
+        # Get detailed composition
+        detailed = sim.lattice.get_composition_detailed()
+
         # Final state
         self.final_metrics = {
             "final_step": sim.step,
@@ -134,6 +137,11 @@ class ExperimentResults:
                     if self.n_ti_list and self.n_ti_list[-1] > 0
                     else 0.0
                 ),
+                "ti_free": detailed['ti_free'],
+                "ti_oxide": detailed['ti_oxide'],
+                "o_free": detailed['o_free'],
+                "o_oxide": detailed['o_oxide'],
+                "n_tio2_molecules": detailed['ti_oxide'],  # Each Ti in oxide = 1 TiO2
             },
         }
 
@@ -404,6 +412,11 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
         f"Composition: Ti={results.final_metrics['composition']['n_ti']}, "
         f"O={results.final_metrics['composition']['n_o']}, "
         f"O/Ti ratio={results.final_metrics['composition']['ratio_o_ti']:.3f}"
+    )
+    logger.info(
+        f"TiO2 molecules formed: {results.final_metrics['composition']['n_tio2_molecules']} "
+        f"(Ti free: {results.final_metrics['composition']['ti_free']}, "
+        f"O free: {results.final_metrics['composition']['o_free']})"
     )
 
     if results.final_metrics["scaling_exponents"]["alpha"] is not None:

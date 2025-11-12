@@ -125,25 +125,62 @@ class RateCalculator:
 
         return self.deposition_rate * sticking_coefficient
 
+    def _has_es_barrier(
+        self,
+        site: Site,
+        target_site: Site,
+        lattice_sites: list[Site],
+    ) -> bool:
+        """
+        Check if diffusion involves Ehrlich-Schwoebel barrier.
+
+        ES barrier occurs when an atom jumps down from a step edge.
+        A step edge is identified by having neighbors at lower z-coordinate.
+
+        Args:
+            site: Source site.
+            target_site: Destination site.
+            lattice_sites: Full list of lattice sites to check neighbors.
+
+        Returns:
+            True if ES barrier should be applied.
+        """
+        # Get z-coordinates from positions
+        z_source = site.position[2]
+        z_target = target_site.position[2]
+
+        # Only applies when moving downward
+        if z_target >= z_source:
+            return False
+
+        # Check if source site is at a step edge (has neighbors below current level)
+        has_lower_neighbors = any(
+            lattice_sites[n_idx].position[2] < z_source
+            for n_idx in site.neighbors
+        )
+
+        return has_lower_neighbors
+
     def calculate_diffusion_rate(
         self,
         site: Site,
         target_site: Site,
         activation_energy: float,
         attempt_frequency: float = 1e13,
+        lattice_sites: list[Site] | None = None,
     ) -> float:
         """
         Calculate diffusion rate using Arrhenius equation.
 
-        The activation energy may depend on local coordination.
-        Atoms that are part of TiO2 molecules (bonded) have much
-        higher diffusion barriers.
+        The activation energy may depend on local coordination, bonding state,
+        and Ehrlich-Schwoebel barrier for step-edge descents.
 
         Args:
             site: Source site.
             target_site: Destination site.
             activation_energy: Base activation energy (eV).
             attempt_frequency: Attempt frequency (Hz).
+            lattice_sites: Full lattice sites list (needed for ES barrier check).
 
         Returns:
             Diffusion rate (Hz).
@@ -158,6 +195,10 @@ class RateCalculator:
         if site.is_in_oxide:
             # TiO2 molecules are much more stable, increase barrier by 3x
             effective_ea *= 3.0
+
+        # Ehrlich-Schwoebel barrier for descending step edges
+        if lattice_sites is not None and self._has_es_barrier(site, target_site, lattice_sites):
+            effective_ea += self.params.ea_es
 
         arrhenius = ArrheniusRate(
             attempt_frequency=attempt_frequency,

@@ -149,7 +149,7 @@ class KMCSimulator:
                     )
 
                     rate = self.rate_calculator.calculate_diffusion_rate(
-                        site, neighbor, activation_energy=ea_diff
+                        site, neighbor, activation_energy=ea_diff, lattice_sites=self.lattice.sites
                     )
 
                     self.event_catalog.add_event(
