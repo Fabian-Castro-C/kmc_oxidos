@@ -514,9 +514,15 @@ ZUnits = Angstrom
 # Lattice constant: {lattice_constant} Angstrom
 """
 
-            # Write header as bytes with null terminator
-            f.write(header.encode('ascii'))
-            f.write(b'\x00')  # Null terminator
+            # Write header as bytes
+            header_bytes = header.encode('ascii')
+            f.write(header_bytes)
+
+            # Calculate and write null-byte padding to align to 4 bytes
+            # GSF spec requires data to start at 4-byte aligned position
+            header_length = len(header_bytes)
+            padding_length = 4 - (header_length % 4)
+            f.write(b'\x00' * padding_length)
 
             # Write binary data (4-byte floats, little-endian)
             # GSF expects row-major order (y varies fastest)
