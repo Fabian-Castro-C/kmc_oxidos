@@ -84,6 +84,10 @@ class ExperimentResults:
         self.coverages = []
         self.n_ti_list = []
         self.n_o_list = []
+        self.n_ti_free_list = []
+        self.n_ti_oxide_list = []
+        self.n_o_free_list = []
+        self.n_o_oxide_list = []
 
         # Final metrics
         self.final_metrics = {}
@@ -96,9 +100,12 @@ class ExperimentResults:
         roughness = calculate_roughness(height_profile)
         coverage = float(height_profile.mean())
 
-        # Count species
+        # Count species (total and detailed)
         n_ti = sum(1 for site in sim.lattice.sites if site.species == SpeciesType.TI)
         n_o = sum(1 for site in sim.lattice.sites if site.species == SpeciesType.O)
+
+        # Get detailed composition (free vs oxide)
+        detailed = sim.lattice.get_composition_detailed()
 
         self.times.append(sim.time)
         self.steps.append(sim.step)
@@ -106,6 +113,10 @@ class ExperimentResults:
         self.coverages.append(coverage)
         self.n_ti_list.append(n_ti)
         self.n_o_list.append(n_o)
+        self.n_ti_free_list.append(detailed['ti_free'])
+        self.n_ti_oxide_list.append(detailed['ti_oxide'])
+        self.n_o_free_list.append(detailed['o_free'])
+        self.n_o_oxide_list.append(detailed['o_oxide'])
 
     def compute_final_metrics(self, sim: KMCSimulator, duration_s: float):
         """Compute final metrics and validation checks."""
@@ -244,13 +255,22 @@ class ExperimentResults:
         plt.savefig(self.output_dir / "plot_02_coverage_evolution.png", dpi=150)
         plt.close()
 
-        # Plot 3: Composition evolution (Ti vs O)
-        fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(self.steps, self.n_ti_list, "r-", linewidth=2, label="Ti atoms")
-        ax.plot(self.steps, self.n_o_list, "b-", linewidth=2, label="O atoms")
+        # Plot 3: Composition evolution (Ti vs O, free vs oxide)
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        # Plot stacked areas or lines
+        ax.plot(self.steps, self.n_ti_free_list, "-", color="#ff6b6b", linewidth=2,
+                label="Ti free", marker="o", markersize=3, markevery=max(1, len(self.steps)//20))
+        ax.plot(self.steps, self.n_ti_oxide_list, "-", color="#8b0000", linewidth=2,
+                label="Ti in TiO2", marker="s", markersize=3, markevery=max(1, len(self.steps)//20))
+        ax.plot(self.steps, self.n_o_free_list, "-", color="#4dabf7", linewidth=2,
+                label="O free", marker="^", markersize=3, markevery=max(1, len(self.steps)//20))
+        ax.plot(self.steps, self.n_o_oxide_list, "-", color="#1864ab", linewidth=2,
+                label="O in TiO2", marker="D", markersize=3, markevery=max(1, len(self.steps)//20))
+
         ax.set_xlabel("KMC Steps", fontsize=12)
         ax.set_ylabel("Number of Atoms", fontsize=12)
-        ax.set_title("Composition Evolution (Ti vs O)", fontsize=14, fontweight="bold")
+        ax.set_title("Composition Evolution (Free vs Bonded)", fontsize=14, fontweight="bold")
         ax.grid(True, alpha=0.3)
         ax.legend()
         plt.tight_layout()
@@ -300,6 +320,10 @@ class ExperimentResults:
             "coverages": self.coverages,
             "n_ti": self.n_ti_list,
             "n_o": self.n_o_list,
+            "n_ti_free": self.n_ti_free_list,
+            "n_ti_oxide": self.n_ti_oxide_list,
+            "n_o_free": self.n_o_free_list,
+            "n_o_oxide": self.n_o_oxide_list,
         }
 
         timeseries_path = self.output_dir / "timeseries.json"

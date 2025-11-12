@@ -195,10 +195,6 @@ class KMCSimulator:
         # Add reaction events (Ti + 2O -> TiO2)
         n_reactions = self._detect_and_add_reaction_events()
 
-        # Log if reactions detected (temporary debug)
-        if n_reactions > 0:
-            logger.info(f"Detected {n_reactions} possible TiO2 reactions at step {self.step}")
-
         # DEBUG logging
         logger.debug(
             f"build_event_list: ads_Ti={n_ads_ti}, ads_O={n_ads_o}, "

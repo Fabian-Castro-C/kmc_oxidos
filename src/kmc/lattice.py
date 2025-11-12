@@ -267,6 +267,42 @@ class Lattice:
             composition[site.species] += 1
         return composition
 
+    def get_composition_detailed(self) -> dict[str, int]:
+        """
+        Get detailed composition separating free atoms from bonded (oxide) atoms.
+
+        Returns:
+            Dictionary with counts:
+            - 'ti_free': Ti atoms not in oxide
+            - 'ti_oxide': Ti atoms in oxide (bonded)
+            - 'o_free': O atoms not in oxide
+            - 'o_oxide': O atoms in oxide (bonded)
+            - 'vacant': Vacant sites
+        """
+        counts = {
+            'ti_free': 0,
+            'ti_oxide': 0,
+            'o_free': 0,
+            'o_oxide': 0,
+            'vacant': 0,
+        }
+
+        for site in self.sites:
+            if site.species == SpeciesType.TI:
+                if site.is_in_oxide:
+                    counts['ti_oxide'] += 1
+                else:
+                    counts['ti_free'] += 1
+            elif site.species == SpeciesType.O:
+                if site.is_in_oxide:
+                    counts['o_oxide'] += 1
+                else:
+                    counts['o_free'] += 1
+            elif site.species == SpeciesType.VACANT:
+                counts['vacant'] += 1
+
+        return counts
+
     def get_neighbor_species(self, site_idx: int) -> list[SpeciesType]:
         """
         Get list of species occupying neighboring sites.
