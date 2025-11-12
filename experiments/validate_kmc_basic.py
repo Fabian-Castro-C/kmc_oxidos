@@ -89,6 +89,13 @@ class ExperimentResults:
         self.n_o_free_list = []
         self.n_o_oxide_list = []
 
+        # Scaling exponents evolution
+        self.alpha_list = []
+        self.beta_list = []
+
+        # Snapshots for movie generation
+        self.height_profiles = []
+
         # Final metrics
         self.final_metrics = {}
         self.validation_status = {}
@@ -117,6 +124,30 @@ class ExperimentResults:
         self.n_ti_oxide_list.append(detailed['ti_oxide'])
         self.n_o_free_list.append(detailed['o_free'])
         self.n_o_oxide_list.append(detailed['o_oxide'])
+
+        # Store height profile for movie generation
+        self.height_profiles.append(height_profile.copy())
+
+        # Calculate scaling exponents if we have enough data
+        if len(self.times) >= 5:
+            try:
+                times_array = np.array(self.times)
+                roughnesses_array = np.array(self.roughnesses)
+                system_size = float(
+                    np.sqrt(self.config.lattice_size[0] * self.config.lattice_size[1])
+                )
+
+                scaling = fit_family_vicsek(times_array, roughnesses_array, system_size)
+                self.alpha_list.append(float(scaling["alpha"]))
+                self.beta_list.append(float(scaling["beta"]))
+            except Exception:
+                # If fitting fails, append None
+                self.alpha_list.append(None)
+                self.beta_list.append(None)
+        else:
+            # Not enough data yet
+            self.alpha_list.append(None)
+            self.beta_list.append(None)
 
     def compute_final_metrics(self, sim: KMCSimulator, duration_s: float):
         """Compute final metrics and validation checks."""
@@ -297,7 +328,133 @@ class ExperimentResults:
         plt.savefig(self.output_dir / "plot_04_height_profile_final.png", dpi=150)
         plt.close()
 
+        # NEW: Plot 5: Scaling exponents evolution (alpha and beta)
+        if len(self.alpha_list) > 0:
+            # Filter out None values
+            valid_indices = [i for i, a in enumerate(self.alpha_list) if a is not None]
+            if valid_indices:
+                valid_steps = [self.steps[i] for i in valid_indices]
+                valid_alpha = [self.alpha_list[i] for i in valid_indices]
+                valid_beta = [self.beta_list[i] for i in valid_indices]
+
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+
+                # Alpha evolution
+                ax1.plot(valid_steps, valid_alpha, "ro-", linewidth=2, markersize=6, label=r"$\alpha$ (roughness exponent)")
+                ax1.axhline(y=0.5, color='k', linestyle='--', alpha=0.3, label=r"$\alpha=0.5$ (EW class)")
+                ax1.axhline(y=0.38, color='b', linestyle='--', alpha=0.3, label=r"$\alpha=0.38$ (KPZ class)")
+                ax1.set_xlabel("KMC Steps", fontsize=12)
+                ax1.set_ylabel(r"$\alpha$", fontsize=14)
+                ax1.set_title(r"Roughness Exponent ($\alpha$) Evolution", fontsize=14, fontweight="bold")
+                ax1.grid(True, alpha=0.3)
+                ax1.legend()
+
+                # Beta evolution
+                ax2.plot(valid_steps, valid_beta, "bs-", linewidth=2, markersize=6, label=r"$\beta$ (growth exponent)")
+                ax2.axhline(y=0.25, color='k', linestyle='--', alpha=0.3, label=r"$\beta=0.25$ (EW class)")
+                ax2.axhline(y=0.33, color='r', linestyle='--', alpha=0.3, label=r"$\beta=0.33$ (KPZ class)")
+                ax2.set_xlabel("KMC Steps", fontsize=12)
+                ax2.set_ylabel(r"$\beta$", fontsize=14)
+                ax2.set_title(r"Growth Exponent ($\beta$) Evolution", fontsize=14, fontweight="bold")
+                ax2.grid(True, alpha=0.3)
+                ax2.legend()
+
+                plt.tight_layout()
+                plt.savefig(self.output_dir / "plot_05_scaling_exponents_evolution.png", dpi=150)
+                plt.close()
+
+        # NEW: Generate individual snapshots for movie creation
+        self._generate_snapshot_frames()
+
         logger.info("[OK] All plots generated successfully")
+
+    def _generate_snapshot_frames(self):
+        """Generate individual frames for each snapshot to create movies."""
+        logger.info(f"Generating {len(self.height_profiles)} snapshot frames...")
+
+        # Create snapshots directory
+        snapshots_dir = self.output_dir / "snapshots"
+        snapshots_dir.mkdir(exist_ok=True)
+
+        # Find global min/max for consistent colorbar
+        all_heights = np.concatenate([h.flatten() for h in self.height_profiles])
+        vmin, vmax = float(all_heights.min()), float(all_heights.max())
+
+        for i, height_profile in enumerate(self.height_profiles):
+            step = self.steps[i]
+            time_s = self.times[i]
+            roughness = self.roughnesses[i]
+            coverage = self.coverages[i]
+
+            # Create figure with 2 subplots: height profile and metrics
+            fig = plt.figure(figsize=(14, 6))
+            gs = fig.add_gridspec(1, 2, width_ratios=[1, 1], hspace=0.3, wspace=0.3)
+
+            # Left: Height profile
+            ax1 = fig.add_subplot(gs[0, 0])
+            im = ax1.imshow(height_profile, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
+            ax1.set_xlabel("X", fontsize=11)
+            ax1.set_ylabel("Y", fontsize=11)
+            ax1.set_title(f"Height Profile - Step {step}", fontsize=12, fontweight="bold")
+            plt.colorbar(im, ax=ax1, label="Height (layers)")
+
+            # Right: Summary metrics as text
+            ax2 = fig.add_subplot(gs[0, 1])
+            ax2.axis('off')
+
+            # Calculate alpha and beta for this snapshot if available
+            alpha_val = self.alpha_list[i] if i < len(self.alpha_list) else None
+            beta_val = self.beta_list[i] if i < len(self.beta_list) else None
+
+            # Calculate O/Ti ratio
+            o_ti_ratio = self.n_o_list[i] / self.n_ti_list[i] if self.n_ti_list[i] > 0 else 0.0
+
+            # Format alpha and beta values
+            alpha_str = f"{alpha_val:.3f}" if alpha_val is not None else "N/A"
+            beta_str = f"{beta_val:.3f}" if beta_val is not None else "N/A"
+
+            metrics_text = f"""
+Simulation Metrics
+
+Step: {step}
+Time: {time_s:.3e} s
+
+Surface Properties:
+  Roughness (W): {roughness:.3f} Å
+  Coverage: {coverage:.3f} ML
+
+Composition:
+  Ti atoms: {self.n_ti_list[i]}
+    - Free: {self.n_ti_free_list[i]}
+    - In TiO₂: {self.n_ti_oxide_list[i]}
+
+  O atoms: {self.n_o_list[i]}
+    - Free: {self.n_o_free_list[i]}
+    - In TiO₂: {self.n_o_oxide_list[i]}
+
+  TiO₂ molecules: {self.n_ti_oxide_list[i]}
+  O/Ti ratio: {o_ti_ratio:.3f}
+
+Scaling Exponents:
+  α (roughness): {alpha_str}
+  β (growth): {beta_str}
+            """
+
+            ax2.text(0.05, 0.95, metrics_text, transform=ax2.transAxes,
+                    fontsize=10, verticalalignment='top', fontfamily='monospace',
+                    bbox={'boxstyle': 'round', 'facecolor': 'wheat', 'alpha': 0.3})
+
+            plt.suptitle(f"KMC Simulation - Frame {i+1}/{len(self.height_profiles)}",
+                        fontsize=14, fontweight="bold")
+
+            # Save frame
+            frame_path = snapshots_dir / f"frame_{i:04d}.png"
+            plt.savefig(frame_path, dpi=120, bbox_inches='tight')
+            plt.close()
+
+        logger.info(f"[OK] {len(self.height_profiles)} frames saved to {snapshots_dir}/")
+        logger.info("[INFO] To create a movie, use:")
+        logger.info(f"  ffmpeg -framerate 2 -i {snapshots_dir}/frame_%04d.png -c:v libx264 -pix_fmt yuv420p {self.output_dir}/movie.mp4")
 
     def save_results(self):
         """Save all results to JSON files."""
@@ -332,6 +489,8 @@ class ExperimentResults:
             "n_ti_oxide": self.n_ti_oxide_list,
             "n_o_free": self.n_o_free_list,
             "n_o_oxide": self.n_o_oxide_list,
+            "alpha": self.alpha_list,
+            "beta": self.beta_list,
         }
 
         timeseries_path = self.output_dir / "timeseries.json"
