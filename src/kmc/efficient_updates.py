@@ -175,9 +175,28 @@ def update_events_after_execution(simulator: KMCSimulator, event: Event) -> None
         simulator: KMC simulator instance.
         event: Event that was just executed (currently unused in workaround).
     """
+    # DEBUG logging
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    before_n_events = len(simulator.event_catalog)
+    before_total_rate = simulator.event_catalog.total_rate
+    before_surface = len(simulator.lattice.surface_sites)
+
     # Temporary workaround: full rebuild to avoid index bugs
     # The 'event' parameter is kept for interface compatibility but not used
     simulator.build_event_list()
+
+    after_n_events = len(simulator.event_catalog)
+    after_total_rate = simulator.event_catalog.total_rate
+    after_surface = len(simulator.lattice.surface_sites)
+
+    logger.debug(
+        f"Event update: events {before_n_events}→{after_n_events}, "
+        f"total_rate {before_total_rate:.6f}→{after_total_rate:.6f}, "
+        f"surface_sites {before_surface}→{after_surface}"
+    )
 
 
 def initialize_all_events(simulator: KMCSimulator) -> None:

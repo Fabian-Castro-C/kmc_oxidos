@@ -12,6 +12,7 @@ Output: Logs, metrics JSON, and plots in experiments/results/validate_kmc_basic/
 """
 
 import json
+import logging
 import sys
 import time
 from datetime import datetime
@@ -29,8 +30,10 @@ from src.kmc.lattice import SpeciesType
 from src.kmc.simulator import KMCSimulator
 from src.settings import settings
 
-# Setup logging
+# Setup logging with DEBUG level for investigation
 logger = settings.setup_logging()
+logger.setLevel("DEBUG")
+logging.getLogger("src.kmc.efficient_updates").setLevel(logging.DEBUG)
 
 
 class ExperimentConfig:
@@ -41,9 +44,9 @@ class ExperimentConfig:
         self.lattice_size = (30, 30, 20)
         self.temperature = 600.0  # K
         self.deposition_rate = 0.1  # ML/s
-        self.max_steps = 10000
+        self.max_steps = 100  # Reduced for debugging
         self.seed = 42
-        self.n_snapshots = 20  # Number of measurement points
+        self.n_snapshots = 10  # Reduced for debugging
 
     def to_dict(self):
         return {
