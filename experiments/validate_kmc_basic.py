@@ -495,7 +495,7 @@ Scaling Exponents:
 
         # Write GSF file
         with open(output_path, 'wb') as f:
-            # Write ASCII header
+            # Write ASCII header (without null terminator in the string)
             header = f"""Gwyddion Simple Field 1.0
 XRes = {nx}
 YRes = {ny}
@@ -512,10 +512,11 @@ ZUnits = Angstrom
 # Roughness: {roughness:.6f} Angstrom
 # Coverage: {coverage:.6f} ML
 # Lattice constant: {lattice_constant} Angstrom
-\\0"""
+"""
 
-            # Write header as bytes
+            # Write header as bytes with null terminator
             f.write(header.encode('ascii'))
+            f.write(b'\x00')  # Null terminator
 
             # Write binary data (4-byte floats, little-endian)
             # GSF expects row-major order (y varies fastest)
