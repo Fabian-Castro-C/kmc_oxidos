@@ -292,7 +292,7 @@ class ExperimentResults:
         ax.set_xlabel("X", fontsize=12)
         ax.set_ylabel("Y", fontsize=12)
         ax.set_title("Final Height Profile", fontsize=14, fontweight="bold")
-        plt.colorbar(im, ax=ax, label="Height (ML)")
+        plt.colorbar(im, ax=ax, label="Height (layers)")
         plt.tight_layout()
         plt.savefig(self.output_dir / "plot_04_height_profile_final.png", dpi=150)
         plt.close()
