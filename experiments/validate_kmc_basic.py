@@ -11,6 +11,7 @@ This experiment validates the core KMC simulator functionality:
 Output: Logs, metrics JSON, and plots in experiments/results/validate_kmc_basic/{timestamp}/
 """
 
+import argparse
 import json
 import logging
 import sys
@@ -34,19 +35,29 @@ from src.settings import settings
 logger = settings.setup_logging()
 logger.setLevel("DEBUG")
 logging.getLogger("src.kmc.efficient_updates").setLevel(logging.DEBUG)
+logging.getLogger("src.kmc.simulator").setLevel(logging.DEBUG)
+logging.getLogger("src.kmc.rates").setLevel(logging.DEBUG)
 
 
 class ExperimentConfig:
     """Configuration for the validation experiment."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        lattice_size=(30, 30, 20),
+        temperature=600.0,
+        deposition_rate=0.1,
+        max_steps=100,
+        seed=42,
+        n_snapshots=10,
+    ):
         self.name = "validate_kmc_basic"
-        self.lattice_size = (30, 30, 20)
-        self.temperature = 600.0  # K
-        self.deposition_rate = 0.1  # ML/s
-        self.max_steps = 100  # Reduced for debugging
-        self.seed = 42
-        self.n_snapshots = 10  # Reduced for debugging
+        self.lattice_size = lattice_size
+        self.temperature = temperature  # K
+        self.deposition_rate = deposition_rate  # ML/s
+        self.max_steps = max_steps
+        self.seed = seed
+        self.n_snapshots = n_snapshots
 
     def to_dict(self):
         return {
@@ -413,8 +424,61 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
 
 def main():
     """Main entry point."""
-    # Create configuration
-    config = ExperimentConfig()
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Validate basic KMC simulation without RL",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--lattice-size",
+        type=int,
+        nargs=3,
+        default=[30, 30, 20],
+        metavar=("X", "Y", "Z"),
+        help="Lattice dimensions (X Y Z)",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=600.0,
+        help="Temperature in Kelvin",
+    )
+    parser.add_argument(
+        "--deposition-rate",
+        type=float,
+        default=0.1,
+        help="Deposition rate in ML/s",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=100,
+        help="Maximum number of KMC steps",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility",
+    )
+    parser.add_argument(
+        "--n-snapshots",
+        type=int,
+        default=10,
+        help="Number of snapshots to record during simulation",
+    )
+
+    args = parser.parse_args()
+
+    # Create configuration from arguments
+    config = ExperimentConfig(
+        lattice_size=tuple(args.lattice_size),
+        temperature=args.temperature,
+        deposition_rate=args.deposition_rate,
+        max_steps=args.max_steps,
+        seed=args.seed,
+        n_snapshots=args.n_snapshots,
+    )
 
     # Run experiment
     results = run_experiment(config)

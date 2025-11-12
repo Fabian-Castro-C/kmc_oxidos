@@ -7,6 +7,7 @@ and temperature using the Arrhenius equation.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,8 @@ from .lattice import SpeciesType
 
 if TYPE_CHECKING:
     from .lattice import Lattice, Site
+
+logger = logging.getLogger(__name__)
 
 
 class ArrheniusRate:
@@ -155,7 +158,20 @@ class RateCalculator:
             temperature=self.temperature,
             k_boltzmann=self.k_boltzmann,
         )
-        return arrhenius.calculate_rate()
+        rate = arrhenius.calculate_rate()
+
+        # DEBUG: Log first few diffusion rate calculations
+        if not hasattr(self, '_debug_count'):
+            self._debug_count = 0
+        if self._debug_count < 3:
+            logger.debug(
+                f"calc_diffusion_rate: species={site.species}, coord={site.coordination}, "
+                f"target_coord={target_site.coordination}, ea_base={activation_energy:.3f}, "
+                f"ea_eff={effective_ea:.4f}, rate={rate:.6e} Hz"
+            )
+            self._debug_count += 1
+
+        return rate
 
     def calculate_reaction_rate(
         self,

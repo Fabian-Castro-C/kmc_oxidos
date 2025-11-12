@@ -193,9 +193,9 @@ def update_events_after_execution(simulator: KMCSimulator, event: Event) -> None
     after_surface = len(simulator.lattice.surface_sites)
 
     logger.debug(
-        f"Event update: events {before_n_events}→{after_n_events}, "
-        f"total_rate {before_total_rate:.6f}→{after_total_rate:.6f}, "
-        f"surface_sites {before_surface}→{after_surface}"
+        f"Event update: events {before_n_events}->{after_n_events}, "
+        f"total_rate {before_total_rate:.6f}->{after_total_rate:.6f}, "
+        f"surface_sites {before_surface}->{after_surface}"
     )
 
 

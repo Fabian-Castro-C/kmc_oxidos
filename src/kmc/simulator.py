@@ -94,6 +94,14 @@ class KMCSimulator:
         """
         self.event_catalog.clear()
 
+        # DEBUG: Count events by type
+        n_ads_ti = 0
+        n_ads_o = 0
+        n_diff_ti = 0
+        n_diff_o = 0
+        n_des_ti = 0
+        n_des_o = 0
+
         # Add adsorption events for all surface sites
         for site_idx in self.lattice.surface_sites:
             site = self.lattice.get_site_by_index(site_idx)
@@ -108,6 +116,7 @@ class KMCSimulator:
                         species=SpeciesType.TI,
                     )
                 )
+                n_ads_ti += 1
 
                 # O adsorption
                 rate_o = self.rate_calculator.calculate_adsorption_rate(site, SpeciesType.O)
@@ -119,6 +128,7 @@ class KMCSimulator:
                         species=SpeciesType.O,
                     )
                 )
+                n_ads_o += 1
 
         # Add diffusion and desorption events for occupied sites
         for site_idx, site in self.lattice.iter_occupied_sites():
@@ -152,6 +162,11 @@ class KMCSimulator:
                         )
                     )
 
+                    if site.species == SpeciesType.TI:
+                        n_diff_ti += 1
+                    else:
+                        n_diff_o += 1
+
             event_type = (
                 EventType.DESORPTION_TI
                 if site.species == SpeciesType.TI
@@ -171,6 +186,19 @@ class KMCSimulator:
                     species=site.species,
                 )
             )
+
+            if site.species == SpeciesType.TI:
+                n_des_ti += 1
+            else:
+                n_des_o += 1
+
+        # DEBUG logging
+        logger.debug(
+            f"build_event_list: ads_Ti={n_ads_ti}, ads_O={n_ads_o}, "
+            f"diff_Ti={n_diff_ti}, diff_O={n_diff_o}, "
+            f"des_Ti={n_des_ti}, des_O={n_des_o}, "
+            f"total_events={len(self.event_catalog)}, total_rate={self.event_catalog.total_rate:.6e}"
+        )
 
     def select_event(self) -> Event | None:
         """
