@@ -59,7 +59,7 @@ class Site:
     def is_surface(self) -> bool:
         """Check if site is on the surface (has vacant neighbors above)."""
         return self.coordination < 6  # For simple cubic lattice
-    
+
     def is_bonded(self) -> bool:
         """Check if site is chemically bonded to other atoms."""
         return len(self.bonded_to) > 0

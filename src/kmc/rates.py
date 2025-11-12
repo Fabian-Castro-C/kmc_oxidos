@@ -274,3 +274,58 @@ class RateCalculator:
                     energy += -1.5  # O-O bond
 
         return energy
+
+    def calculate_tio2_formation_rate(
+        self,
+        lattice: Lattice,
+        ti_site_index: int,
+        o_site_indices: list[int],
+    ) -> float | None:
+        """
+        Calculate rate for Ti + 2O -> TiO2 reaction.
+
+        Args:
+            lattice: The lattice structure.
+            ti_site_index: Index of Ti site.
+            o_site_indices: List of at least 2 O site indices that are neighbors of Ti.
+
+        Returns:
+            Reaction rate in Hz, or None if reaction is not possible.
+        """
+        ti_site = lattice.get_site_by_index(ti_site_index)
+
+        # Verify Ti site
+        if ti_site.species != SpeciesType.TI:
+            return None
+
+        # Verify we have at least 2 O neighbors
+        if len(o_site_indices) < 2:
+            return None
+
+        # Check if Ti or O atoms are already bonded (part of another oxide)
+        if ti_site.is_in_oxide:
+            return None
+
+        for o_idx in o_site_indices[:2]:  # Only check first 2
+            o_site = lattice.get_site_by_index(o_idx)
+            if o_site.species != SpeciesType.O:
+                return None
+            if o_site.is_in_oxide:
+                return None
+
+        # Calculate effective activation energy based on local coordination
+        # More neighbors -> more stable configuration -> higher barrier to react
+        ti_coord = ti_site.coordination
+        coord_factor = ti_coord / 6.0  # Normalize by max coordination
+
+        # Base reaction activation energy (typically low, 0.1-0.3 eV for surface reactions)
+        # Higher coordination means atoms are more stable, harder to react
+        effective_ea = self.params.ea_reaction_tio2 * (0.8 + 0.4 * coord_factor)
+
+        # Calculate reaction rate
+        rate = self.calculate_reaction_rate(
+            activation_energy=effective_ea,
+            attempt_frequency=self.params.nu_reaction,
+        )
+
+        return rate

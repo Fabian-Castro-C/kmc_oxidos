@@ -54,6 +54,7 @@ class TiO2Parameters:
 
     # Attempt frequencies (typical phonon frequencies)
     attempt_frequency: float = 1e13  # Hz
+    nu_reaction: float = 1e13  # Hz (reaction attempt frequency)
 
     # Diffusion barriers
     # Note: These are approximate values. Actual values depend on:
