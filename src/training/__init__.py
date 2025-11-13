@@ -12,11 +12,8 @@ All dependencies are included in the base project installation.
 
 from __future__ import annotations
 
+from .gym_environment import TiO2GrowthEnv
+
 __all__ = [
     "TiO2GrowthEnv",
-    "RewardConfig",
-    "compute_reward",
-    "ESSMonitorCallback",
-    "MorphologyLoggerCallback",
-    "CurriculumScheduler",
 ]

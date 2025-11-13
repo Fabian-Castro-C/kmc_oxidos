@@ -1263,7 +1263,6 @@ requires-dist = [
     { name = "torch", specifier = ">=2.9.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
-provides-extras = ["training"]
 
 [package.metadata.requires-dev]
 dev = [
