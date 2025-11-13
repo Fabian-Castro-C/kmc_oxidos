@@ -18,7 +18,12 @@ import torch
 if TYPE_CHECKING:
     from ..kmc.lattice import Lattice
     from ..kmc.rates import RateCalculator
-    from .swarm_policy import DiffusionSwarmPolicy
+    from .swarm_policy import (
+        AdsorptionSwarmPolicy,
+        DesorptionSwarmPolicy,
+        DiffusionSwarmPolicy,
+        ReactionSwarmPolicy,
+    )
 
 from ..kmc.events import Event, EventType
 from ..kmc.lattice import SpeciesType
@@ -46,26 +51,50 @@ class SwarmProposal:
     species: SpeciesType
 
 
-class SwarmEngine:
+@dataclass
+class EventProposal:
     """
-    Core engine for SwarmThinkers event selection.
-
-    This class orchestrates the swarm-based proposal, reweighting, and selection
-    process. It does NOT modify the KMCSimulator directly - instead it generates
-    events that can be executed by the simulator.
-
-    Phase 1 (diffusion-only) workflow:
-        1. Get diffusable atoms from lattice
-        2. Extract local observations
-        3. Policy proposes directions for each agent
-        4. Sample N proposals from the swarm
-        5. Compute physical rates for proposals only
-        6. Reweight: P(a) = π(a)·Γ_a / Z
-        7. Select event via reweighted sampling
-        8. Return event + importance weight
+    Generic event proposal from any swarm policy.
 
     Attributes:
-        policy: The diffusion swarm policy network.
+        event_type: Type of event (ADSORPTION, DIFFUSION, DESORPTION, REACTION).
+        site_index: Primary site index.
+        target_index: Target site index (for diffusion) or None.
+        logit: Raw logit from policy network.
+        species: Species involved (Ti or O).
+    """
+
+    event_type: EventType
+    site_index: int
+    target_index: int | None
+    logit: float
+    species: SpeciesType
+
+
+class SwarmEngine:
+    """
+    Core engine for SwarmThinkers event selection with ALL event types.
+
+    This class orchestrates swarm-based proposal, reweighting, and selection
+    for ALL events: diffusion, adsorption, desorption, and reaction.
+    Each event type has its own learned policy network.
+
+    Workflow:
+        1. Generate proposals from each policy:
+           - Diffusion: propose directions for mobile atoms
+           - Adsorption: propose surface sites for incoming atoms
+           - Desorption: propose atoms to desorb
+           - Reaction: propose Ti atoms to react with O
+        2. Compute physical rates for ALL proposals
+        3. Global reweighting: P(a) = π(a)·Γ_a / Z
+        4. Select event via reweighted sampling
+        5. Return event + importance weight
+
+    Attributes:
+        diffusion_policy: Policy for diffusion events.
+        adsorption_policy: Policy for adsorption events.
+        desorption_policy: Policy for desorption events.
+        reaction_policy: Policy for reaction events.
         rate_calculator: Calculator for physical transition rates.
         reweighting: Mechanism for combining policy and rates.
         device: Torch device (cpu or cuda).
@@ -73,20 +102,36 @@ class SwarmEngine:
 
     def __init__(
         self,
-        policy: DiffusionSwarmPolicy,
+        diffusion_policy: DiffusionSwarmPolicy,
+        adsorption_policy: AdsorptionSwarmPolicy,
+        desorption_policy: DesorptionSwarmPolicy,
+        reaction_policy: ReactionSwarmPolicy,
         rate_calculator: RateCalculator,
         device: str = "cpu",
     ) -> None:
         """
-        Initialize swarm engine.
+        Initialize swarm engine with all policies.
 
         Args:
-            policy: Trained or initialized diffusion policy.
+            diffusion_policy: Policy for diffusion events.
+            adsorption_policy: Policy for adsorption events.
+            desorption_policy: Policy for desorption events.
+            reaction_policy: Policy for reaction events.
             rate_calculator: Rate calculator from KMC simulator.
             device: Device for torch computations.
         """
-        self.policy = policy.to(device)
-        self.policy.eval()  # Set to evaluation mode
+        self.diffusion_policy = diffusion_policy.to(device)
+        self.diffusion_policy.eval()
+
+        self.adsorption_policy = adsorption_policy.to(device)
+        self.adsorption_policy.eval()
+
+        self.desorption_policy = desorption_policy.to(device)
+        self.desorption_policy.eval()
+
+        self.reaction_policy = reaction_policy.to(device)
+        self.reaction_policy.eval()
+
         self.rate_calculator = rate_calculator
         self.reweighting = ReweightingMechanism()
         self.device = device
@@ -123,7 +168,7 @@ class SwarmEngine:
 
         # 3. Get logits from policy (batch_size, n_directions)
         with torch.no_grad():
-            logits_batch = self.policy(obs_tensor)  # Shape: (n_agents, 12)
+            logits_batch = self.diffusion_policy(obs_tensor)  # Shape: (n_agents, 12)
 
         logits_np = logits_batch.cpu().numpy()
 
@@ -246,9 +291,7 @@ class SwarmEngine:
         policy_probs = exp_logits / np.sum(exp_logits)
 
         # 2. Reweight with physical rates
-        reweighted_probs = self.reweighting.compute_reweighted_distribution(
-            policy_probs, rates
-        )
+        reweighted_probs = self.reweighting.compute_reweighted_distribution(policy_probs, rates)
 
         # 3. Select event
         selected_idx = np.random.choice(len(proposals), p=reweighted_probs)
@@ -261,16 +304,21 @@ class SwarmEngine:
         return selected_proposal, importance_weight
 
     def run_step(
-        self, lattice: Lattice, n_swarm: int = 32
+        self, lattice: Lattice, event_catalog, n_swarm: int = 32
     ) -> tuple[Event | None, float]:
         """
-        Execute one SwarmThinkers step: propose, reweight, select.
+        Execute one SwarmThinkers step: propose diffusions + include all other events, reweight, select.
 
-        This is the main entry point for swarm-based event selection.
+        This implements the full SwarmThinkers framework:
+        - Diffusion events: proposed by learned policy with logits π_θ(a)
+        - Other events (adsorption, desorption, reaction): included with uniform logits (0.0)
+        - All events compete via reweighting: P(a) = exp(logit_a) · Γ_a / Z
+        - Importance sampling: w = 1/π_θ(a_selected)
 
         Args:
             lattice: Current lattice state.
-            n_swarm: Number of proposals in the swarm.
+            event_catalog: EventCatalog with all possible events (from KMC simulator).
+            n_swarm: Number of diffusion proposals in the swarm.
 
         Returns:
             Tuple of:
@@ -279,37 +327,76 @@ class SwarmEngine:
 
         Example:
             >>> engine = SwarmEngine(policy, rate_calc)
-            >>> event, weight = engine.run_step(lattice, n_swarm=32)
-            >>> simulator.execute_event(event)  # Execute in classic simulator
+            >>> event, weight = engine.run_step(lattice, sim.event_catalog, n_swarm=32)
+            >>> simulator.execute_event(event)
         """
-        # 1. Generate proposals
-        proposals, logits = self.generate_proposals(lattice, n_swarm)
+        # 1. Generate diffusion proposals (policy-driven)
+        diff_proposals, diff_logits = self.generate_proposals(lattice, n_swarm)
 
-        if len(proposals) == 0:
-            # No valid proposals (e.g., no diffusable atoms)
+        # 2. Get all non-diffusion events from catalog (uniform policy)
+        non_diff_events = []
+        non_diff_logits = []
+        for event in event_catalog.events:
+            if event.event_type not in [EventType.DIFFUSION_TI, EventType.DIFFUSION_O]:
+                non_diff_events.append(event)
+                non_diff_logits.append(0.0)  # Uniform logit (exp(0) = 1)
+
+        # 3. Combine: proposals → Events for unified handling
+        all_events = []
+        all_logits = []
+        all_rates = []
+
+        # Add diffusion proposals as Events
+        if len(diff_proposals) > 0:
+            diff_rates = self.compute_rates_for_proposals(diff_proposals, lattice)
+            for i, proposal in enumerate(diff_proposals):
+                event_type = (
+                    EventType.DIFFUSION_TI
+                    if proposal.species == SpeciesType.TI
+                    else EventType.DIFFUSION_O
+                )
+                event = Event(
+                    event_type=event_type,
+                    site_index=proposal.agent_idx,
+                    target_index=proposal.target_idx,
+                    rate=diff_rates[i],
+                    species=proposal.species,
+                )
+                all_events.append(event)
+                all_logits.append(diff_logits[i])
+                all_rates.append(diff_rates[i])
+
+        # Add non-diffusion events
+        all_events.extend(non_diff_events)
+        all_logits.extend(non_diff_logits)
+        all_rates.extend([e.rate for e in non_diff_events])
+
+        if len(all_events) == 0:
+            # No events available
             return None, 1.0
 
-        # 2. Compute rates
-        rates = self.compute_rates_for_proposals(proposals, lattice)
+        # 4. Reweight and select from ALL events
+        all_logits_np = np.array(all_logits)
+        all_rates_np = np.array(all_rates)
 
-        # 3. Reweight and select
-        selected_proposal, importance_weight = self.reweight_and_select(
-            proposals, logits, rates
-        )
+        # Reweighting: P(a) = exp(logit_a) · rate_a / Z
+        logits_shifted = all_logits_np - np.max(all_logits_np)
+        exp_logits = np.exp(logits_shifted)
+        weights = exp_logits * all_rates_np
+        total_weight = np.sum(weights)
 
-        # 4. Convert to Event object (compatible with KMCSimulator)
-        event_type = (
-            EventType.DIFFUSION_TI
-            if selected_proposal.species == SpeciesType.TI
-            else EventType.DIFFUSION_O
-        )
+        if total_weight == 0:
+            return None, 1.0
 
-        event = Event(
-            event_type=event_type,
-            site_index=selected_proposal.agent_idx,
-            target_index=selected_proposal.target_idx,
-            rate=rates[proposals.index(selected_proposal)],
-            species=selected_proposal.species,
-        )
+        probs = weights / total_weight
 
-        return event, importance_weight
+        # Sample event
+        selected_idx = np.random.choice(len(all_events), p=probs)
+        selected_event = all_events[selected_idx]
+
+        # Importance weight: w = 1 / π_θ(a_selected)
+        # π_θ(a) = exp(logit_a) / Σ exp(logit_a')
+        policy_probs = exp_logits / np.sum(exp_logits)
+        importance_weight = 1.0 / policy_probs[selected_idx]
+
+        return selected_event, importance_weight
