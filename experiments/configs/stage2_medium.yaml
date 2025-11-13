@@ -1,0 +1,37 @@
+# Stage 2: Medium lattice for transfer learning
+# Focus: Scale up learned behaviors to larger systems
+
+# Environment configuration
+environment:
+  lattice_size: [20, 20, 10]
+  temperature: 600.0
+  deposition_rate: 1.0
+  max_steps: 200
+  n_swarm: 4
+  n_proposals: 32
+  reward_weights:
+    roughness_weight: -1.0
+    coverage_weight: 0.5
+    ratio_weight: -0.3
+    ess_weight: -0.1
+
+# PPO hyperparameters
+ppo:
+  learning_rate: 1.0e-4  # Lower LR for fine-tuning
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.005        # Reduced entropy for exploitation
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+# Training configuration
+total_timesteps: 500_000  # 500k steps for stage 2
+n_envs: 8                 # Parallel environments
+
+# ESS monitoring
+ess_threshold: 0.3
+ess_patience: 10

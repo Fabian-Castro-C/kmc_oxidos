@@ -235,8 +235,14 @@ class EpisodeSummaryCallback(BaseCallback):
         if len(self.locals.get("infos", [])) > 0:
             for info in self.locals["infos"]:
                 if "episode" in info:
-                    self.episode_count += 1
                     episode_data = info["episode"]
+
+                    # Only log if this is our custom episode dict (with final_roughness)
+                    # Skip SB3's default episode wrapper dict
+                    if "final_roughness" not in episode_data:
+                        continue
+
+                    self.episode_count += 1
 
                     # Log episode summary
                     self.logger.record("episode/reward", episode_data["r"])

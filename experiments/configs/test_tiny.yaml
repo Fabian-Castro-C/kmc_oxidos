@@ -1,0 +1,33 @@
+# Test configuration: Ultra-small for quick validation
+# This config is only for testing the training pipeline, not for real training
+
+environment:
+  lattice_size: [5, 5, 3]  # Tiny lattice
+  temperature: 600.0
+  deposition_rate: 1.0
+  max_steps: 20            # Very few steps per episode
+  n_swarm: 4
+  n_proposals: 16          # Fewer proposals
+  reward_weights:
+    roughness_weight: -1.0
+    coverage_weight: 0.5
+    ratio_weight: -0.3
+    ess_weight: -0.1
+
+ppo:
+  learning_rate: 3.0e-4
+  n_steps: 64              # Minimal rollout
+  batch_size: 16           # Small batch
+  n_epochs: 2              # Few epochs
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+total_timesteps: 500      # Just 500 steps for testing
+n_envs: 2                 # Only 2 parallel envs
+
+ess_threshold: 0.1        # Low threshold for test
+ess_patience: 100         # High patience (won't trigger)

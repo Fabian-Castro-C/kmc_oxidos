@@ -77,3 +77,6 @@ Thumbs.db
 # Papers
 docs/papers/
 docs/agent/
+
+# Model
+experiments/test_training_output

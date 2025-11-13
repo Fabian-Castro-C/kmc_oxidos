@@ -1,0 +1,37 @@
+# Stage 3: Large lattice for production-scale learning
+# Focus: Final policy refinement at production scale
+
+# Environment configuration
+environment:
+  lattice_size: [50, 50, 20]
+  temperature: 600.0
+  deposition_rate: 1.0
+  max_steps: 500
+  n_swarm: 4
+  n_proposals: 32
+  reward_weights:
+    roughness_weight: -1.0
+    coverage_weight: 0.5
+    ratio_weight: -0.3
+    ess_weight: -0.1
+
+# PPO hyperparameters
+ppo:
+  learning_rate: 3.0e-5  # Very low LR for fine-tuning
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.001        # Minimal entropy, focus on exploitation
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+
+# Training configuration
+total_timesteps: 1_000_000  # 1M steps for stage 3
+n_envs: 4                   # Fewer envs due to larger system size
+
+# ESS monitoring
+ess_threshold: 0.3
+ess_patience: 10
