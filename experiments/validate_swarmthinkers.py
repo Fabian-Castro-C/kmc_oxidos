@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.analysis import calculate_roughness
 from src.data.tio2_parameters import TiO2Parameters
+from src.kmc.efficient_updates import update_events_after_execution
 from src.kmc.lattice import SpeciesType
 from src.kmc.rates import RateCalculator
 from src.kmc.simulator import KMCSimulator
@@ -324,8 +325,8 @@ class ExperimentResults:
         self.validation_status = checks
 
         for check_name, result in checks.items():
-            status = "✓ PASS" if result else "✗ FAIL"
-            logger.info(f"  [{status}] {check_name}")
+            status = "[PASS]" if result else "[FAIL]"
+            logger.info(f"  {status} {check_name}")
 
     def generate_plots(self):
         """Generate comparison plots."""
@@ -499,6 +500,24 @@ class ExperimentResults:
 
     def save_results(self):
         """Save all results to JSON files."""
+        # Helper to convert numpy types to Python types
+        def convert_to_serializable(obj):
+            """Recursively convert numpy types to Python native types."""
+            if isinstance(obj, dict):
+                return {k: convert_to_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_to_serializable(v) for v in obj]
+            elif isinstance(obj, (np.integer, np.int32, np.int64)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float32, np.float64)):
+                return float(obj)
+            elif isinstance(obj, (bool, np.bool_)):
+                return bool(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            else:
+                return obj
+
         # Save configuration
         config_path = self.output_dir / "experiment_config.json"
         with open(config_path, "w") as f:
@@ -509,10 +528,10 @@ class ExperimentResults:
             "experiment_name": self.config.name,
             "timestamp": self.timestamp,
             "config": self.config.to_dict(),
-            "ks_test_results": self.ks_test_results,
-            "ess_metrics": self.ess_metrics,
-            "performance_comparison": self.performance_comparison,
-            "validation_status": self.validation_status,
+            "ks_test_results": convert_to_serializable(self.ks_test_results),
+            "ess_metrics": convert_to_serializable(self.ess_metrics),
+            "performance_comparison": convert_to_serializable(self.performance_comparison),
+            "validation_status": convert_to_serializable(self.validation_status),
             "n_kmc_trials": len(self.kmc_trials),
             "n_swarm_trials": len(self.swarm_trials),
         }
@@ -543,7 +562,9 @@ def run_kmc_trial(config: ExperimentConfig, trial_id: int) -> TrialResults:
 
     for i in range(config.n_snapshots):
         target_step = (i + 1) * steps_between
-        sim.run_until_step(target_step)
+        # Run KMC steps until target
+        while sim.step < target_step:
+            sim.run_step()
         trial.record_snapshot(sim)
 
     duration = time.time() - start_time
@@ -574,6 +595,7 @@ def run_swarmthinkers_trial(
     # Create rate calculator and swarm engine
     rate_calculator = RateCalculator(
         temperature=config.temperature,
+        deposition_rate=config.deposition_rate,
         params=params,
     )
     swarm_engine = SwarmEngine(
@@ -585,17 +607,41 @@ def run_swarmthinkers_trial(
     steps_between = config.max_steps // config.n_snapshots
     start_time = time.time()
 
+    # Diagnostic counters
+    event_counts = {
+        "adsorption_ti": 0,
+        "adsorption_o": 0,
+        "diffusion_ti": 0,
+        "diffusion_o": 0,
+        "desorption_ti": 0,
+        "desorption_o": 0,
+        "reaction_tio2": 0,
+    }
+
     for i in range(config.n_snapshots):
         target_step = (i + 1) * steps_between
 
         # Run swarm-based steps
         while sim.step < target_step:
-            # Generate event via swarm engine
-            event, importance_weight = swarm_engine.run_step(sim.lattice, n_swarm=config.swarm_size)
+            # Generate event via swarm engine (includes ALL event types)
+            event, importance_weight = swarm_engine.run_step(
+                sim.lattice, sim.event_catalog, n_swarm=config.swarm_size
+            )
 
-            # Execute event and update time
+            # If no valid events available
+            if event is None:
+                logger.warning("No events available in SwarmThinkers, stopping trial")
+                break
+
+            # Execute swarm-selected event using full KMC step mechanics
+            # (execute event, update catalog, advance time, increment step)
             sim.execute_event(event)
+            update_events_after_execution(sim, event)
+            sim.advance_time()
             sim.step += 1
+
+            # Count event type
+            event_counts[event.event_type.value] += 1
 
             # Store importance weight for ESS calculation
             trial.importance_weights.append(importance_weight)
@@ -604,6 +650,13 @@ def run_swarmthinkers_trial(
 
     duration = time.time() - start_time
     trial.finalize(duration)
+
+    # Log event distribution
+    total_events = sum(event_counts.values())
+    logger.info(f"    [DEBUG] Event distribution ({total_events} total):")
+    for event_type, count in event_counts.items():
+        pct = 100 * count / total_events if total_events > 0 else 0
+        logger.info(f"      {event_type}: {count} ({pct:.1f}%)")
 
     return trial
 
@@ -685,10 +738,10 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
     overall_pass = results.validation_status.get("_overall_pass", False)
     if overall_pass:
         logger.info(
-            "✓ VALIDATION PASSED: SwarmThinkers produces statistically identical distributions"
+            "[PASS] VALIDATION PASSED: SwarmThinkers produces statistically identical distributions"
         )
     else:
-        logger.warning("✗ VALIDATION FAILED: Check metrics and plots for details")
+        logger.warning("[FAIL] VALIDATION FAILED: Check metrics and plots for details")
 
     logger.info(f"\nResults saved to: {results.output_dir}")
 
