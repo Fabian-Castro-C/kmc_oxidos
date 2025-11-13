@@ -53,6 +53,7 @@ htmlcov/
 # Logs
 logs/
 *.log
+simulation_log.txt
 
 # Results and data
 results/
