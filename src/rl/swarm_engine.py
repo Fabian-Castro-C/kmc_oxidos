@@ -136,11 +136,11 @@ class SwarmEngine:
         self.reweighting = ReweightingMechanism()
         self.device = device
 
-    def generate_proposals(
+    def generate_diffusion_proposals(
         self, lattice: Lattice, n_swarm: int
-    ) -> tuple[list[SwarmProposal], npt.NDArray[np.float64]]:
+    ) -> tuple[list[EventProposal], npt.NDArray[np.float64]]:
         """
-        Generate N swarm proposals from policy.
+        Generate N diffusion proposals from policy.
 
         Args:
             lattice: Current lattice state.
@@ -148,7 +148,7 @@ class SwarmEngine:
 
         Returns:
             Tuple of:
-                - List of SwarmProposal objects
+                - List of EventProposal objects (diffusion events)
                 - Array of logits (before softmax) for each proposal
 
         Note:
@@ -189,10 +189,10 @@ class SwarmEngine:
                 if target_site.species != SpeciesType.VACANT:
                     continue  # Skip occupied targets
 
-                proposal = SwarmProposal(
-                    agent_idx=agent_global_idx,
-                    direction_idx=dir_idx,
-                    target_idx=neighbor_idx,
+                proposal = EventProposal(
+                    event_type=EventType.DIFFUSION_TI if species == SpeciesType.TI else EventType.DIFFUSION_O,
+                    site_index=agent_global_idx,
+                    target_index=neighbor_idx,
                     logit=logits_np[agent_local_idx, dir_idx],
                     species=species,
                 )
@@ -212,6 +212,239 @@ class SwarmEngine:
         probs = exp_logits / np.sum(exp_logits)
 
         # Sample proposals
+        n_to_sample = min(n_swarm, len(all_proposals))
+        sampled_indices = np.random.choice(
+            len(all_proposals), size=n_to_sample, replace=False, p=probs
+        )
+
+        sampled_proposals = [all_proposals[i] for i in sampled_indices]
+        sampled_logits = all_logits_array[sampled_indices]
+
+        return sampled_proposals, sampled_logits
+
+    def generate_adsorption_proposals(
+        self, lattice: Lattice, n_swarm: int
+    ) -> tuple[list[EventProposal], npt.NDArray[np.float64]]:
+        """
+        Generate N adsorption proposals from policy.
+
+        Proposes optimal surface sites for Ti/O adsorption based on
+        local topology (heights, neighbors, curvature).
+
+        Args:
+            lattice: Current lattice state.
+            n_swarm: Number of proposals to generate.
+
+        Returns:
+            Tuple of (EventProposal list, logits array).
+        """
+        # 1. Get all surface sites (vacant sites at maximum height)
+        surface_indices = []
+        for idx, site in enumerate(lattice.sites):
+            if site.species == SpeciesType.VACANT and site.position[2] == lattice.size[2] - 1:
+                surface_indices.append(idx)
+
+        if len(surface_indices) == 0:
+            return [], np.array([])
+
+        # 2. Extract observations for surface sites
+        observations = get_batch_observations(lattice, surface_indices)
+        obs_tensor = torch.from_numpy(observations).float().to(self.device)
+
+        # 3. Get logits from adsorption policy (1 logit per site)
+        with torch.no_grad():
+            logits_batch = self.adsorption_policy(obs_tensor)  # Shape: (n_sites,)
+
+        logits_np = logits_batch.cpu().numpy()
+
+        # 4. Create proposals (one per site, alternating Ti/O)
+        all_proposals = []
+        all_logits = []
+
+        for site_local_idx, site_global_idx in enumerate(surface_indices):
+            # Alternate between Ti and O adsorption
+            for species, event_type in [
+                (SpeciesType.TI, EventType.ADSORPTION_TI),
+                (SpeciesType.O, EventType.ADSORPTION_O),
+            ]:
+                proposal = EventProposal(
+                    event_type=event_type,
+                    site_index=site_global_idx,
+                    target_index=None,
+                    logit=logits_np[site_local_idx],
+                    species=species,
+                )
+                all_proposals.append(proposal)
+                all_logits.append(proposal.logit)
+
+        if len(all_proposals) == 0:
+            return [], np.array([])
+
+        all_logits_array = np.array(all_logits)
+
+        # 5. Sample n_swarm proposals
+        logits_shifted = all_logits_array - np.max(all_logits_array)
+        exp_logits = np.exp(logits_shifted)
+        probs = exp_logits / np.sum(exp_logits)
+
+        n_to_sample = min(n_swarm, len(all_proposals))
+        sampled_indices = np.random.choice(
+            len(all_proposals), size=n_to_sample, replace=False, p=probs
+        )
+
+        sampled_proposals = [all_proposals[i] for i in sampled_indices]
+        sampled_logits = all_logits_array[sampled_indices]
+
+        return sampled_proposals, sampled_logits
+
+    def generate_desorption_proposals(
+        self, lattice: Lattice, n_swarm: int
+    ) -> tuple[list[EventProposal], npt.NDArray[np.float64]]:
+        """
+        Generate N desorption proposals from policy.
+
+        Proposes which adsorbed atoms (Ti/O) should desorb based on
+        local coordination, binding energy estimates, surface position.
+
+        Args:
+            lattice: Current lattice state.
+            n_swarm: Number of proposals to generate.
+
+        Returns:
+            Tuple of (EventProposal list, logits array).
+        """
+        # 1. Get all adsorbed atoms (non-vacant surface sites)
+        adsorbed_indices = []
+        for idx, site in enumerate(lattice.sites):
+            if site.species != SpeciesType.VACANT and site.position[2] == lattice.size[2] - 1:
+                adsorbed_indices.append(idx)
+
+        if len(adsorbed_indices) == 0:
+            return [], np.array([])
+
+        # 2. Extract observations
+        observations = get_batch_observations(lattice, adsorbed_indices)
+        obs_tensor = torch.from_numpy(observations).float().to(self.device)
+
+        # 3. Get logits from desorption policy
+        with torch.no_grad():
+            logits_batch = self.desorption_policy(obs_tensor)  # Shape: (n_atoms,)
+
+        logits_np = logits_batch.cpu().numpy()
+
+        # 4. Create proposals (one per adsorbed atom)
+        all_proposals = []
+        all_logits = []
+
+        for atom_local_idx, atom_global_idx in enumerate(adsorbed_indices):
+            site = lattice.sites[atom_global_idx]
+            species = site.species
+
+            event_type = (
+                EventType.DESORPTION_TI if species == SpeciesType.TI else EventType.DESORPTION_O
+            )
+
+            proposal = EventProposal(
+                event_type=event_type,
+                site_index=atom_global_idx,
+                target_index=None,
+                logit=logits_np[atom_local_idx],
+                species=species,
+            )
+            all_proposals.append(proposal)
+            all_logits.append(proposal.logit)
+
+        if len(all_proposals) == 0:
+            return [], np.array([])
+
+        all_logits_array = np.array(all_logits)
+
+        # 5. Sample n_swarm proposals
+        logits_shifted = all_logits_array - np.max(all_logits_array)
+        exp_logits = np.exp(logits_shifted)
+        probs = exp_logits / np.sum(exp_logits)
+
+        n_to_sample = min(n_swarm, len(all_proposals))
+        sampled_indices = np.random.choice(
+            len(all_proposals), size=n_to_sample, replace=False, p=probs
+        )
+
+        sampled_proposals = [all_proposals[i] for i in sampled_indices]
+        sampled_logits = all_logits_array[sampled_indices]
+
+        return sampled_proposals, sampled_logits
+
+    def generate_reaction_proposals(
+        self, lattice: Lattice, n_swarm: int
+    ) -> tuple[list[EventProposal], npt.NDArray[np.float64]]:
+        """
+        Generate N reaction proposals from policy.
+
+        Proposes Ti atoms that should react with neighboring O atoms
+        to form TiO₂. Requires Ti to have ≥2 O neighbors.
+
+        Args:
+            lattice: Current lattice state.
+            n_swarm: Number of proposals to generate.
+
+        Returns:
+            Tuple of (EventProposal list, logits array).
+        """
+        # 1. Get all Ti atoms with sufficient O neighbors
+        reaction_candidates = []
+        for idx, site in enumerate(lattice.sites):
+            if site.species != SpeciesType.TI:
+                continue
+
+            # Count O neighbors
+            n_o_neighbors = 0
+            for neighbor_idx in site.neighbors:
+                neighbor_site = lattice.sites[neighbor_idx]
+                if neighbor_site.species == SpeciesType.O:
+                    n_o_neighbors += 1
+
+            # Need at least 2 O neighbors for TiO2 reaction
+            if n_o_neighbors >= 2:
+                reaction_candidates.append(idx)
+
+        if len(reaction_candidates) == 0:
+            return [], np.array([])
+
+        # 2. Extract observations
+        observations = get_batch_observations(lattice, reaction_candidates)
+        obs_tensor = torch.from_numpy(observations).float().to(self.device)
+
+        # 3. Get logits from reaction policy
+        with torch.no_grad():
+            logits_batch = self.reaction_policy(obs_tensor)  # Shape: (n_candidates,)
+
+        logits_np = logits_batch.cpu().numpy()
+
+        # 4. Create proposals (one per Ti candidate)
+        all_proposals = []
+        all_logits = []
+
+        for candidate_local_idx, candidate_global_idx in enumerate(reaction_candidates):
+            proposal = EventProposal(
+                event_type=EventType.REACTION_TIO2,
+                site_index=candidate_global_idx,
+                target_index=None,
+                logit=logits_np[candidate_local_idx],
+                species=SpeciesType.TI,
+            )
+            all_proposals.append(proposal)
+            all_logits.append(proposal.logit)
+
+        if len(all_proposals) == 0:
+            return [], np.array([])
+
+        all_logits_array = np.array(all_logits)
+
+        # 5. Sample n_swarm proposals
+        logits_shifted = all_logits_array - np.max(all_logits_array)
+        exp_logits = np.exp(logits_shifted)
+        probs = exp_logits / np.sum(exp_logits)
+
         n_to_sample = min(n_swarm, len(all_proposals))
         sampled_indices = np.random.choice(
             len(all_proposals), size=n_to_sample, replace=False, p=probs
@@ -264,6 +497,70 @@ class SwarmEngine:
 
         return rates
 
+    def compute_rates_for_event_proposals(
+        self, proposals: list[EventProposal], lattice: Lattice
+    ) -> npt.NDArray[np.float64]:
+        """
+        Compute physical transition rates for generic event proposals.
+
+        Handles ALL event types: diffusion, adsorption, desorption, reaction.
+
+        Args:
+            proposals: List of EventProposal objects.
+            lattice: Current lattice state.
+
+        Returns:
+            Array of rates (Hz) for each proposal.
+        """
+        rates = np.zeros(len(proposals))
+
+        for i, proposal in enumerate(proposals):
+            site = lattice.sites[proposal.site_index]
+
+            if proposal.event_type in [EventType.DIFFUSION_TI, EventType.DIFFUSION_O]:
+                # Diffusion: need source + target sites
+                target_site = lattice.sites[proposal.target_index]
+                ea = (
+                    self.rate_calculator.params.ea_diff_ti
+                    if proposal.species == SpeciesType.TI
+                    else self.rate_calculator.params.ea_diff_o
+                )
+                rate = self.rate_calculator.calculate_diffusion_rate(
+                    site=site,
+                    target_site=target_site,
+                    activation_energy=ea,
+                    lattice_sites=lattice.sites,
+                )
+
+            elif proposal.event_type in [EventType.ADSORPTION_TI, EventType.ADSORPTION_O]:
+                # Adsorption: constant rate from deposition_rate
+                rate = self.rate_calculator.deposition_rate
+
+            elif proposal.event_type in [EventType.DESORPTION_TI, EventType.DESORPTION_O]:
+                # Desorption: use calculate_desorption_rate
+                ea = (
+                    self.rate_calculator.params.ea_des_ti
+                    if proposal.species == SpeciesType.TI
+                    else self.rate_calculator.params.ea_des_o
+                )
+                rate = self.rate_calculator.calculate_desorption_rate(
+                    activation_energy=ea
+                )
+
+            elif proposal.event_type == EventType.REACTION_TIO2:
+                # Reaction: use calculate_reaction_rate
+                rate = self.rate_calculator.calculate_reaction_rate(
+                    site=site,
+                    lattice_sites=lattice.sites,
+                )
+
+            else:
+                raise ValueError(f"Unknown event type: {proposal.event_type}")
+
+            rates[i] = rate
+
+        return rates
+
     def reweight_and_select(
         self,
         proposals: list[SwarmProposal],
@@ -304,21 +601,20 @@ class SwarmEngine:
         return selected_proposal, importance_weight
 
     def run_step(
-        self, lattice: Lattice, event_catalog, n_swarm: int = 32
+        self, lattice: Lattice, n_swarm: int = 32
     ) -> tuple[Event | None, float]:
         """
-        Execute one SwarmThinkers step: propose diffusions + include all other events, reweight, select.
+        Execute one SwarmThinkers step using ALL policies (full framework).
 
-        This implements the full SwarmThinkers framework:
-        - Diffusion events: proposed by learned policy with logits π_θ(a)
-        - Other events (adsorption, desorption, reaction): included with uniform logits (0.0)
-        - All events compete via reweighting: P(a) = exp(logit_a) · Γ_a / Z
+        This implements the complete multi-policy SwarmThinkers framework:
+        - ALL events (diffusion, adsorption, desorption, reaction) proposed by learned policies
+        - Global reweighting: P(a) = π_θ(a) · Γ_a / Z
         - Importance sampling: w = 1/π_θ(a_selected)
+        - FULLY DECOUPLED from KMC classic event catalog
 
         Args:
             lattice: Current lattice state.
-            event_catalog: EventCatalog with all possible events (from KMC simulator).
-            n_swarm: Number of diffusion proposals in the swarm.
+            n_swarm: Number of proposals per event type.
 
         Returns:
             Tuple of:
@@ -326,56 +622,40 @@ class SwarmEngine:
                 - Importance weight for this step
 
         Example:
-            >>> engine = SwarmEngine(policy, rate_calc)
-            >>> event, weight = engine.run_step(lattice, sim.event_catalog, n_swarm=32)
+            >>> engine = SwarmEngine(diff_pol, ads_pol, des_pol, react_pol, rate_calc)
+            >>> event, weight = engine.run_step(lattice, n_swarm=32)
             >>> simulator.execute_event(event)
         """
-        # 1. Generate diffusion proposals (policy-driven)
-        diff_proposals, diff_logits = self.generate_proposals(lattice, n_swarm)
+        # 1. Generate proposals from ALL policies
+        diff_proposals, diff_logits = self.generate_diffusion_proposals(lattice, n_swarm)
+        ads_proposals, ads_logits = self.generate_adsorption_proposals(lattice, n_swarm)
+        des_proposals, des_logits = self.generate_desorption_proposals(lattice, n_swarm)
+        react_proposals, react_logits = self.generate_reaction_proposals(lattice, n_swarm)
 
-        # 2. Get all non-diffusion events from catalog (uniform policy)
-        non_diff_events = []
-        non_diff_logits = []
-        for event in event_catalog.events:
-            if event.event_type not in [EventType.DIFFUSION_TI, EventType.DIFFUSION_O]:
-                non_diff_events.append(event)
-                non_diff_logits.append(0.0)  # Uniform logit (exp(0) = 1)
-
-        # 3. Combine: proposals → Events for unified handling
-        all_events = []
+        # 2. Combine all proposals
+        all_proposals = []
         all_logits = []
-        all_rates = []
 
-        # Add diffusion proposals as Events
-        if len(diff_proposals) > 0:
-            diff_rates = self.compute_rates_for_proposals(diff_proposals, lattice)
-            for i, proposal in enumerate(diff_proposals):
-                event_type = (
-                    EventType.DIFFUSION_TI
-                    if proposal.species == SpeciesType.TI
-                    else EventType.DIFFUSION_O
-                )
-                event = Event(
-                    event_type=event_type,
-                    site_index=proposal.agent_idx,
-                    target_index=proposal.target_idx,
-                    rate=diff_rates[i],
-                    species=proposal.species,
-                )
-                all_events.append(event)
-                all_logits.append(diff_logits[i])
-                all_rates.append(diff_rates[i])
+        all_proposals.extend(diff_proposals)
+        all_logits.extend(diff_logits.tolist() if len(diff_logits) > 0 else [])
 
-        # Add non-diffusion events
-        all_events.extend(non_diff_events)
-        all_logits.extend(non_diff_logits)
-        all_rates.extend([e.rate for e in non_diff_events])
+        all_proposals.extend(ads_proposals)
+        all_logits.extend(ads_logits.tolist() if len(ads_logits) > 0 else [])
 
-        if len(all_events) == 0:
-            # No events available
+        all_proposals.extend(des_proposals)
+        all_logits.extend(des_logits.tolist() if len(des_logits) > 0 else [])
+
+        all_proposals.extend(react_proposals)
+        all_logits.extend(react_logits.tolist() if len(react_logits) > 0 else [])
+
+        if len(all_proposals) == 0:
+            # No proposals available
             return None, 1.0
 
-        # 4. Reweight and select from ALL events
+        # 3. Compute physical rates for ALL proposals
+        all_rates = self.compute_rates_for_event_proposals(all_proposals, lattice)
+
+        # 4. Global reweighting and selection
         all_logits_np = np.array(all_logits)
         all_rates_np = np.array(all_rates)
 
@@ -391,12 +671,20 @@ class SwarmEngine:
         probs = weights / total_weight
 
         # Sample event
-        selected_idx = np.random.choice(len(all_events), p=probs)
-        selected_event = all_events[selected_idx]
+        selected_idx = np.random.choice(len(all_proposals), p=probs)
+        selected_proposal = all_proposals[selected_idx]
 
-        # Importance weight: w = 1 / π_θ(a_selected)
-        # π_θ(a) = exp(logit_a) / Σ exp(logit_a')
+        # 5. Convert EventProposal to Event (for KMCSimulator compatibility)
+        event = Event(
+            event_type=selected_proposal.event_type,
+            site_index=selected_proposal.site_index,
+            target_index=selected_proposal.target_index,
+            rate=all_rates_np[selected_idx],
+            species=selected_proposal.species,
+        )
+
+        # 6. Compute importance weight: w = 1 / π_θ(a_selected)
         policy_probs = exp_logits / np.sum(exp_logits)
         importance_weight = 1.0 / policy_probs[selected_idx]
 
-        return selected_event, importance_weight
+        return event, importance_weight

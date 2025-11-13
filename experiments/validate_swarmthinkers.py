@@ -37,9 +37,15 @@ from src.kmc.lattice import SpeciesType
 from src.kmc.rates import RateCalculator
 from src.kmc.simulator import KMCSimulator
 from src.rl import (
+    AdsorptionSwarmPolicy,
+    DesorptionSwarmPolicy,
     DiffusionSwarmPolicy,
+    ReactionSwarmPolicy,
     SwarmEngine,
+    create_adsorption_swarm_policy,
+    create_desorption_swarm_policy,
     create_diffusion_swarm_policy,
+    create_reaction_swarm_policy,
 )
 from src.settings import settings
 
@@ -576,7 +582,10 @@ def run_kmc_trial(config: ExperimentConfig, trial_id: int) -> TrialResults:
 def run_swarmthinkers_trial(
     config: ExperimentConfig,
     trial_id: int,
-    policy: DiffusionSwarmPolicy,
+    diffusion_policy: DiffusionSwarmPolicy,
+    adsorption_policy: AdsorptionSwarmPolicy,
+    desorption_policy: DesorptionSwarmPolicy,
+    reaction_policy: ReactionSwarmPolicy,
     device: torch.device,
 ) -> TrialResults:
     """Run single SwarmThinkers trial."""
@@ -592,14 +601,17 @@ def run_swarmthinkers_trial(
         seed=config.seed + trial_id + 1000,  # Offset to avoid overlap with KMC seeds
     )
 
-    # Create rate calculator and swarm engine
+    # Create rate calculator and swarm engine with ALL 4 policies
     rate_calculator = RateCalculator(
         temperature=config.temperature,
         deposition_rate=config.deposition_rate,
         params=params,
     )
     swarm_engine = SwarmEngine(
-        policy=policy,
+        diffusion_policy=diffusion_policy,
+        adsorption_policy=adsorption_policy,
+        desorption_policy=desorption_policy,
+        reaction_policy=reaction_policy,
         rate_calculator=rate_calculator,
         device=device,
     )
@@ -623,9 +635,9 @@ def run_swarmthinkers_trial(
 
         # Run swarm-based steps
         while sim.step < target_step:
-            # Generate event via swarm engine (includes ALL event types)
+            # Generate event via swarm engine (ALL events policy-driven, NO event_catalog)
             event, importance_weight = swarm_engine.run_step(
-                sim.lattice, sim.event_catalog, n_swarm=config.swarm_size
+                sim.lattice, n_swarm=config.swarm_size
             )
 
             # If no valid events available
@@ -671,17 +683,26 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
     results = ExperimentResults(config)
     device = torch.device(settings.get_device())
 
-    # Initialize policy
-    logger.info(f"Initializing DiffusionSwarmPolicy on {device}")
-    policy = create_diffusion_swarm_policy()
-    policy.to(device)
-    policy.eval()  # Evaluation mode (no dropout, batch norm in eval mode)
+    # Initialize ALL 4 policies (complete SwarmThinkers framework)
+    logger.info(f"Initializing 4 SwarmThinkers policies on {device}")
+    diffusion_policy = create_diffusion_swarm_policy()
+    adsorption_policy = create_adsorption_swarm_policy()
+    desorption_policy = create_desorption_swarm_policy()
+    reaction_policy = create_reaction_swarm_policy()
+
+    # Move to device and set eval mode
+    diffusion_policy.to(device).eval()
+    adsorption_policy.to(device).eval()
+    desorption_policy.to(device).eval()
+    reaction_policy.to(device).eval()
 
     if config.policy_checkpoint:
-        logger.info(f"Loading policy from {config.policy_checkpoint}")
-        policy.load_state_dict(torch.load(config.policy_checkpoint, map_location=device))
+        logger.info(f"Loading policies from {config.policy_checkpoint}")
+        # TODO: Load checkpoint with all 4 policies
+        # For now, only diffusion policy checkpoint is supported
+        diffusion_policy.load_state_dict(torch.load(config.policy_checkpoint, map_location=device))
     else:
-        logger.info("Using randomly initialized policy (Phase 1 validation)")
+        logger.info("Using randomly initialized policies (Phase 1 validation)")
 
     # Run KMC classic trials
     logger.info(f"\n{'=' * 80}")
@@ -705,7 +726,15 @@ def run_experiment(config: ExperimentConfig) -> ExperimentResults:
 
     for trial_id in range(config.n_trials):
         logger.info(f"  Trial {trial_id + 1}/{config.n_trials}...")
-        trial = run_swarmthinkers_trial(config, trial_id, policy, device)
+        trial = run_swarmthinkers_trial(
+            config,
+            trial_id,
+            diffusion_policy,
+            adsorption_policy,
+            desorption_policy,
+            reaction_policy,
+            device,
+        )
         results.add_trial(trial)
         logger.info(
             f"    Completed: roughness={trial.final_roughness:.3f}, "
