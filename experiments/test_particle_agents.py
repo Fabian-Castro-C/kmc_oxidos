@@ -16,7 +16,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.kmc.lattice import Lattice, SpeciesType
+from src.kmc.lattice import SpeciesType
 from src.kmc.simulator import KMCSimulator
 from src.rl.particle_agent import ActionType, ParticleAgent, create_agents_from_lattice
 
@@ -59,7 +59,7 @@ def test_agent_creation():
     return sim, agents
 
 
-def test_local_observations(sim, agents):
+def test_local_observations( agents):
     """Test 2: Local observation extraction."""
     print("\n" + "=" * 60)
     print("Test 2: Local Observations")
@@ -95,7 +95,7 @@ def test_local_observations(sim, agents):
     print("\n✓ Local observation test passed")
 
 
-def test_observation_encoding(sim, agents):
+def test_observation_encoding( agents):
     """Test 3: Observation vector encoding."""
     print("\n" + "=" * 60)
     print("Test 3: Observation Encoding")
@@ -173,24 +173,28 @@ def test_valid_actions():
     # Test Ti with O neighbors for reaction (use fresh lattice)
     print("\nTesting REACT_TIO2 action availability...")
     sim_react = KMCSimulator(lattice_size=(3, 3, 3), temperature=600.0, deposition_rate=1.0)
-    
+
     # Position (1,1,1) → idx = 1 + 1*3 + 1*3*3 = 13
     ti_center_idx = 1 + 1 * nx + 1 * nx * ny
     sim_react.lattice.deposit_atom(ti_center_idx, SpeciesType.TI)
-    
+
     # Add 2 O neighbors
     # Position (0,1,1) → idx = 0 + 1*3 + 1*3*3 = 12
     sim_react.lattice.deposit_atom(0 + 1 * nx + 1 * nx * ny, SpeciesType.O)
     # Position (2,1,1) → idx = 2 + 1*3 + 1*3*3 = 14
     sim_react.lattice.deposit_atom(2 + 1 * nx + 1 * nx * ny, SpeciesType.O)
-    
+
     ti_with_o_agent = ParticleAgent(ti_center_idx, sim_react.lattice)
     ti_with_o_actions = ti_with_o_agent.get_valid_actions()
     print(f"Ti with 2 O neighbors actions ({len(ti_with_o_actions)}):")
     for action in ti_with_o_actions:
         print(f"  - {action.name}")
-    assert ActionType.REACT_TIO2 in ti_with_o_actions, "Ti with 2+ O neighbors should be able to react"
-    assert len(ti_with_o_actions) == 8, "Ti with O neighbors should have 8 actions (6 diffuse + 1 desorb + 1 react)"
+    assert ActionType.REACT_TIO2 in ti_with_o_actions, (
+        "Ti with 2+ O neighbors should be able to react"
+    )
+    assert len(ti_with_o_actions) == 8, (
+        "Ti with O neighbors should have 8 actions (6 diffuse + 1 desorb + 1 react)"
+    )
 
     print("\n✓ Valid actions test passed")
 

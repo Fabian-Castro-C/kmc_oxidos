@@ -15,15 +15,14 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from src.kmc.simulator import KMCSimulator
 from src.kmc.lattice import SpeciesType
+from src.kmc.simulator import KMCSimulator
+from src.rl.action_space import (
+    N_ACTIONS,
+    get_batch_action_masks,
+)
 from src.rl.particle_agent import create_agents_from_lattice
 from src.rl.shared_policy import SharedPolicyNetwork
-from src.rl.action_space import (
-    get_action_mask,
-    get_batch_action_masks,
-    N_ACTIONS,
-)
 
 
 def test_network_initialization():
@@ -46,7 +45,7 @@ def test_network_initialization():
     # Expected: (58*256) + 256 + 4*(256*256 + 256) + (256*10) + 10
     # = 14848 + 256 + 4*65792 + 2560 + 10 = 280,842
     total_params = sum(p.numel() for p in policy.parameters())
-    print(f"\nExpected params: ~280,842")
+    print("\nExpected params: ~280,842")
     print(f"Actual params: {total_params:,}")
 
     assert total_params > 200_000, "Network should have >200k parameters"

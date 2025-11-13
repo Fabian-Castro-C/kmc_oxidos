@@ -68,7 +68,7 @@ def test_event_selection():
     # Select event
     event = coordinator.select_event(agents)
 
-    print(f"\nSelected event:")
+    print("\nSelected event:")
     print(f"  Agent index: {event.agent_idx}/{len(agents)}")
     print(f"  Action: {event.action.name}")
     print(f"  Probability: {event.probability:.6f}")
@@ -158,7 +158,7 @@ def test_temperature_effects():
 
     for temp in temperatures:
         _, probs = coordinator.get_global_action_distribution(agents, temperature=temp)
-        
+
         # Calculate entropy (measure of randomness)
         probs_nonzero = probs[probs > 0]
         entropy = -np.sum(probs_nonzero * np.log(probs_nonzero))
@@ -200,23 +200,25 @@ def test_action_masking_integration():
     # Find the Ti agent
     ti_agent = agents[0]  # Should be first non-vacant
     valid_actions = ti_agent.get_valid_actions()
-    
+
     print(f"\nTi agent valid actions ({len(valid_actions)}):")
     for action in valid_actions:
         print(f"  - {action.name}")
 
     # Check probabilities
     agent_probs = probs[0]  # First agent
-    print(f"\nAgent probabilities:")
+    print("\nAgent probabilities:")
     for i, p in enumerate(agent_probs):
         if p > 0:
             from src.rl.particle_agent import ActionType
+
             action = ActionType(i)
             print(f"  {action.name}: {p:.6f}")
 
     # Validate: only valid actions have non-zero probability
     for i in range(10):
         from src.rl.particle_agent import ActionType
+
         action = ActionType(i)
         if action in valid_actions:
             assert agent_probs[i] > 0, f"Valid action {action.name} should have non-zero prob"
@@ -254,7 +256,7 @@ def test_sampling_distribution():
 
     # Get theoretical distribution
     _, probs = coordinator.get_global_action_distribution(agents)
-    
+
     print(f"\nSampled {n_samples} events")
     print(f"Unique (agent, action) pairs sampled: {len(action_counts)}")
 

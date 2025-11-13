@@ -8,10 +8,10 @@ paper (Li et al., 2025): 5 hidden layers with 256 units each.
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
 import numpy as np
 import numpy.typing as npt
+import torch
+import torch.nn as nn
 
 
 class SharedPolicyNetwork(nn.Module):

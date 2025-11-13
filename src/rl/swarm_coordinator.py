@@ -19,7 +19,6 @@ import numpy as np
 import numpy.typing as npt
 
 if TYPE_CHECKING:
-    from src.kmc.lattice import Lattice
     from src.rl.particle_agent import ActionType, ParticleAgent
     from src.rl.shared_policy import SharedPolicyNetwork
 

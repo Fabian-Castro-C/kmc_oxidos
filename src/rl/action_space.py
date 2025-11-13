@@ -13,8 +13,7 @@ import numpy as np
 import numpy.typing as npt
 
 if TYPE_CHECKING:
-    from src.kmc.lattice import SpeciesType
-    from src.rl.particle_agent import ActionType, ParticleAgent
+    from src.rl.particle_agent import ParticleAgent
 
 
 # Total number of possible actions
@@ -31,7 +30,6 @@ def get_action_mask(agent: ParticleAgent) -> npt.NDArray[np.bool_]:
     Returns:
         Boolean array [N_ACTIONS] where True = valid action.
     """
-    from src.rl.particle_agent import ActionType
 
     # Initialize all actions as invalid
     mask = np.zeros(N_ACTIONS, dtype=bool)
@@ -90,7 +88,6 @@ def get_species_action_counts() -> dict[str, list[str]]:
     Returns:
         Dictionary mapping species name to list of action names.
     """
-    from src.kmc.lattice import SpeciesType
     from src.rl.particle_agent import ActionType
 
     result = {
