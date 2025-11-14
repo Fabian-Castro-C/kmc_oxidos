@@ -8,6 +8,12 @@ decision-making across the entire swarm.
 Key differences from traditional KMC:
 - Traditional: Each site independently samples from local rates
 - SwarmThinkers: Global softmax selects ONE event from ALL possibilities
+
+Reweighting mechanism (Phase 4):
+- Pure policy: P(a) ∝ exp(logit_a)
+- With reweighting: P(a) = π_θ(a)·Γ_a / Σ[π_θ(a')·Γ_a']
+- Importance weights: w = Γ_a / π_θ(a)
+- Effective sample size: ESS = (Σw)² / Σw²
 """
 
 from __future__ import annotations
@@ -19,7 +25,9 @@ import numpy as np
 import numpy.typing as npt
 
 if TYPE_CHECKING:
+    from src.kmc.lattice import Lattice
     from src.rl.particle_agent import ActionType, ParticleAgent
+    from src.rl.rate_calculator import ActionRateCalculator
     from src.rl.shared_policy import SharedPolicyNetwork
 
 
@@ -34,6 +42,8 @@ class SelectedEvent:
         probability: Softmax probability of this event.
         logit: Raw logit before softmax.
         global_rank: Rank among all agent×action pairs (0 = highest prob).
+        importance_weight: w = Γ_a / π_θ(a) (only for reweighted selection).
+        physical_rate: Γ_a in Hz (only for reweighted selection).
     """
 
     agent_idx: int
@@ -41,6 +51,8 @@ class SelectedEvent:
     probability: float
     logit: float
     global_rank: int
+    importance_weight: float | None = None
+    physical_rate: float | None = None
 
 
 class SwarmCoordinator:
@@ -214,6 +226,143 @@ class SwarmCoordinator:
         return {
             "step_count": self.step_count,
         }
+
+    def select_event_with_reweighting(
+        self,
+        agents: list[ParticleAgent],
+        lattice: Lattice,
+        rate_calculator: ActionRateCalculator,
+        temperature: float = 1.0,
+    ) -> tuple[SelectedEvent, float]:
+        """
+        Select a single event via reweighted global softmax.
+
+        Combines neural network policy with physical rates:
+        P(a) = π_θ(a)·Γ_a / Σ[π_θ(a')·Γ_a']
+
+        This ensures:
+        - Policy proposes actions (exploration/exploitation)
+        - Physical rates enforce thermodynamic constraints
+        - Importance weights track bias for training
+
+        Args:
+            agents: List of all active agents.
+            lattice: Current lattice state (for rate calculations).
+            rate_calculator: Calculator for physical rates.
+            temperature: Softmax temperature (default: 1.0).
+
+        Returns:
+            Tuple of:
+            - Selected event with importance weight
+            - Effective sample size (ESS)
+        """
+        from src.rl.action_space import get_batch_action_masks
+
+        if len(agents) == 0:
+            raise ValueError("Cannot select event: no agents provided")
+
+        # Step 1: Collect observations
+        observations = self._collect_observations(agents)
+
+        # Step 2: Get action masks
+        action_masks = get_batch_action_masks(agents)
+
+        # Step 3: Policy forward pass → π_θ(a)
+        logits = self.policy.get_action_logits(observations, action_masks)
+
+        # Step 4: Flatten and compute policy probabilities
+        flat_logits = logits.flatten()
+        flat_mask = action_masks.flatten()
+        flat_logits[~flat_mask] = -np.inf
+
+        # Policy probabilities (before reweighting)
+        flat_logits_temp = flat_logits / temperature
+        max_logit = np.max(flat_logits_temp[flat_mask])
+        exp_logits = np.exp(flat_logits_temp - max_logit)
+        exp_logits[~flat_mask] = 0.0
+        policy_probs = exp_logits / np.sum(exp_logits)
+
+        # Step 5: Calculate physical rates Γ_a for all valid actions
+        n_actions = logits.shape[1]
+        physical_rates = np.zeros(len(flat_logits), dtype=np.float32)
+
+        from src.rl.particle_agent import ActionType
+
+        for flat_idx in range(len(flat_logits)):
+            if not flat_mask[flat_idx]:
+                continue
+
+            agent_idx = flat_idx // n_actions
+            action_idx = flat_idx % n_actions
+            action = ActionType(action_idx)
+
+            rate = rate_calculator.calculate_action_rate(
+                agents[agent_idx], action, lattice
+            )
+            physical_rates[flat_idx] = rate
+
+        # Step 6: Reweighted probabilities P(a) = π_θ(a)·Γ_a / Σ[π_θ(a')·Γ_a']
+        reweighted_probs = policy_probs * physical_rates
+        reweighted_probs[~flat_mask] = 0.0
+
+        total_weight = np.sum(reweighted_probs)
+        if total_weight == 0.0:
+            # Fallback: all rates are zero (e.g., all atoms bonded)
+            # Use pure policy (should rarely happen)
+            reweighted_probs = policy_probs
+        else:
+            reweighted_probs = reweighted_probs / total_weight
+
+        # Step 7: Sample event
+        flat_idx = np.random.choice(len(flat_logits), p=reweighted_probs)
+
+        agent_idx = flat_idx // n_actions
+        action_idx = flat_idx % n_actions
+        action = ActionType(action_idx)
+
+        # Step 8: Calculate importance weight w = Γ_a / π_θ(a)
+        if policy_probs[flat_idx] > 0:
+            importance_weight = physical_rates[flat_idx] / policy_probs[flat_idx]
+        else:
+            importance_weight = 0.0
+
+        # Step 9: Calculate ESS for all valid actions
+        valid_indices = np.where(flat_mask)[0]
+        valid_policy_probs = policy_probs[valid_indices]
+        valid_physical_rates = physical_rates[valid_indices]
+
+        valid_weights = np.zeros_like(valid_policy_probs)
+        mask_nonzero = valid_policy_probs > 0
+        valid_weights[mask_nonzero] = (
+            valid_physical_rates[mask_nonzero] / valid_policy_probs[mask_nonzero]
+        )
+
+        sum_weights = np.sum(valid_weights)
+        sum_weights_sq = np.sum(valid_weights**2)
+
+        if sum_weights_sq > 0:
+            ess = (sum_weights**2) / sum_weights_sq
+        else:
+            ess = 0.0
+
+        # Calculate global rank
+        sorted_indices = np.argsort(reweighted_probs)[::-1]
+        global_rank = int(np.where(sorted_indices == flat_idx)[0][0])
+
+        self.step_count += 1
+
+        return (
+            SelectedEvent(
+                agent_idx=agent_idx,
+                action=action,
+                probability=float(reweighted_probs[flat_idx]),
+                logit=float(flat_logits[flat_idx]),
+                global_rank=global_rank,
+                importance_weight=float(importance_weight),
+                physical_rate=float(physical_rates[flat_idx]),
+            ),
+            float(ess),
+        )
 
     def reset_stats(self) -> None:
         """Reset coordinator statistics."""
