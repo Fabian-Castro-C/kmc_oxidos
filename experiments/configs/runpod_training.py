@@ -66,7 +66,7 @@ PPO_CONFIG = {
 # ============================================================================
 TRAINING_CONFIG = {
     # Total training budget
-    "total_timesteps": 5_000_000,  # 5M steps - serious training budget
+    "total_timesteps": 2_000_000,  # 2M steps - serious training budget
     # Rollout collection
     "num_steps": 2048,  # Steps per rollout (standard PPO value)
     "num_envs": 1,  # Number of parallel environments (can increase if memory allows)
