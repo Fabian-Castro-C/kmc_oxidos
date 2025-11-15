@@ -43,7 +43,7 @@ ENV_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 1e-4,  # Reduced for stability (was 3e-4)
+    "learning_rate": 1e-5,  # Reduced for fine-tuning (was 1e-4)
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -72,7 +72,7 @@ TRAINING_CONFIG = {
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
-    "resume_from_checkpoint": None,
+    "resume_from_checkpoint": "experiments/results/train/runpod_1763237538/models/best_model.pt",
     # --- END NEW ---
     # Checkpointing
     "checkpoint_frequency": 50,  # Save checkpoint every N updates
