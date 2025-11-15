@@ -115,11 +115,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             "global_features": self.global_feature_space,
         })
 
-        # The action space is now decoupled from a fixed max_agents value
-        # It represents choosing one agent and one action for that agent.
-        # The actual size will be set in reset() based on lattice size.
-        self.n_possible_agents = self.lattice_size[0] * self.lattice_size[1] * self.lattice_size[2]
-        self.action_space = spaces.MultiDiscrete([self.n_possible_agents, N_ACTIONS])
+        # The action space is now decoupled from a fixed max_agents value.
+        # The training loop will select between agent actions and global actions.
+        self.action_space = spaces.Discrete(N_ACTIONS) # For a single agent
 
 
         # Initialize components (will be (re)created in reset())
@@ -173,9 +171,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Initialize lattice
         self.lattice = Lattice(size=self.lattice_size)
 
-        # Update dynamic action space size
-        self.n_possible_agents = self.lattice_size[0] * self.lattice_size[1] * self.lattice_size[2]
-        self.action_space = spaces.MultiDiscrete([self.n_possible_agents, N_ACTIONS])
+        # The action space is for a single agent; the training loop handles the rest.
+        self.action_space = spaces.Discrete(N_ACTIONS)
 
         # Initialize rate and energy calculators with current temperature
         self.rate_calculator = ActionRateCalculator(
@@ -208,40 +205,43 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         return observation, info
 
-    def step(self, action: tuple[int, int]) -> tuple[dict[str, Any], float, bool, bool, dict[str, Any]]:
+    def step(
+        self, action: tuple[int, int] | str
+    ) -> tuple[dict, float, bool, bool, dict]:
         """
-        Execute one environment step.
+        Execute one time step within the environment.
 
-        Args:
-            action: A tuple of (agent_index, action_index)
-
-        Returns:
-            observation: New observation dict
-            reward: Step reward
-            terminated: Episode ended (e.g., full coverage)
-            truncated: Episode ended (max steps)
-            info: Step information
+        The action can be one of two things:
+        1. A tuple (agent_idx, action_idx) for an agent-driven event.
+        2. A string "DEPOSIT_TI" or "DEPOSIT_O" for a global deposition event.
         """
-        agent_idx, action_idx = action
         self.step_count += 1
-        failure_reason = "Unknown"
 
-        # Validate action
-        if agent_idx >= len(self.agents):
-            # Invalid agent index (can happen if agent list changes)
-            reward = -0.01  # Small penalty for invalid agent
-            terminated = False
-            truncated = self.step_count >= self.max_steps
-            failure_reason = f"Agent index {agent_idx} out of bounds ({len(self.agents)} agents)."
-            info = {"failure_reason": failure_reason, "step": self.step_count, "n_agents": len(self.agents)}
-            return self._get_observation(), reward, terminated, truncated, info
+        is_deposition_action = isinstance(action, str)
 
-        # Get the agent and the action to perform
-        agent = self.agents[agent_idx]
-        action_enum = ActionType(action_idx)
+        if is_deposition_action:
+            if action == "DEPOSIT_TI":
+                success, reason = self._execute_deposition(species=SpeciesType.Ti)
+            elif action == "DEPOSIT_O":
+                success, reason = self._execute_deposition(species=SpeciesType.O)
+            else:
+                success = False
+                reason = f"Unknown deposition action: {action}"
+        else:
+            agent_idx, action_idx = action
 
-        # Execute the event on the lattice
-        success, failure_reason = self._execute_event(agent, action_enum)
+            # Validate agent index
+            if agent_idx >= len(self.agents):
+                reward = -0.01  # Small penalty for invalid agent
+                terminated = False
+                truncated = self.step_count >= self.max_steps
+                reason = f"Agent index {agent_idx} out of bounds ({len(self.agents)} agents)."
+                info = {"failure_reason": reason, "step": self.step_count, "n_agents": len(self.agents)}
+                return self._get_observation(), reward, terminated, truncated, info
+
+            agent = self.agents[agent_idx]
+            action_enum = ActionType(action_idx)
+            success, reason = self._execute_agent_action(agent_idx, action_idx)
 
         # Update agents list after lattice modification
         if success:
@@ -258,15 +258,16 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         truncated = self.step_count >= self.max_steps
 
         # Prepare info dict
+        action_name = "DEPOSITION" if is_deposition_action else str(ActionType(action_idx))
         info = {
             "step": self.step_count,
             "roughness": self._calculate_roughness(),
             "coverage": self._calculate_coverage(),
             "n_agents": len(self.agents),
-            "executed_action": (agent_idx, str(action_enum)),
+            "executed_action": (agent_idx, action_name),
             "reward": reward,
             "success": success,
-            "failure_reason": failure_reason,
+            "failure_reason": reason,
         }
         self.step_info.append(info)
 
@@ -306,76 +307,66 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """
         self.agents = create_agents_from_lattice(self.lattice)
 
-    def _execute_event(self, agent: Any, action: ActionType) -> tuple[bool, str]:
+    def _execute_deposition(self, species: SpeciesType) -> tuple[bool, str]:
+        """Executes a global deposition event for a given species."""
+        # Choose a random (x, y) column for deposition
+        nx, ny, nz = self.lattice_size
+        x, y = np.random.randint(0, nx), np.random.randint(0, ny)
+
+        # Find the highest atom in that column to deposit on top of it
+        z_top = self.lattice.get_surface_height(x, y)
+
+        # Ensure we don't deposit outside the lattice height
+        if z_top + 1 >= self.lattice.size[2]:
+            return False, "Deposition failed: column is full"
+
+        # Deposit the new atom
+        success, reason = self.lattice.deposit_atom(
+            x, y, z_top + 1, species=species
+        )
+        if success:
+            self._synchronize_agents_with_lattice()
+        return success, reason
+
+    def _execute_agent_action(self, agent_idx: int, action_idx: int) -> tuple[bool, str]:
         """
-        Execute the selected event on the lattice.
-
-        Args:
-            agent: The agent performing the action.
-            action: The action to perform.
-
-        Returns:
-            A tuple of (success, reason).
+        Execute the selected event on the lattice for a specific agent.
+        This was previously the _execute_event method.
         """
-        site = agent.site
+        agent = self.agents[agent_idx]
 
-        # Adsorption Events
-        if action in [ActionType.ADSORB_TI, ActionType.ADSORB_O]:
-            species_to_adsorb = SpeciesType.TI if action == ActionType.ADSORB_TI else SpeciesType.O
-            if site.is_occupied():
-                return False, f"Adsorption failed: Site {site.position} is already occupied by {site.species.name}."
-            site.species = species_to_adsorb
-            return True, "Adsorption successful."
-
-        # Desorption Event
-        elif action == ActionType.DESORB:
-            if not site.is_occupied():
-                return False, f"Desorption failed: Site {site.position} is already vacant."
-            site.species = SpeciesType.VACANT
-            return True, "Desorption successful."
-
-        # Diffusion Events
-        elif action in [
-            ActionType.DIFFUSE_X_POS, ActionType.DIFFUSE_X_NEG,
-            ActionType.DIFFUSE_Y_POS, ActionType.DIFFUSE_Y_NEG,
-            ActionType.DIFFUSE_Z_POS, ActionType.DIFFUSE_Z_NEG,
+        # Diffusion actions
+        if action_idx in [
+            ActionType.DIFFUSE_X_POS.value,
+            ActionType.DIFFUSE_X_NEG.value,
+            ActionType.DIFFUSE_Y_POS.value,
+            ActionType.DIFFUSE_Y_NEG.value,
+            ActionType.DIFFUSE_Z_POS.value,
+            ActionType.DIFFUSE_Z_NEG.value,
         ]:
-            if not site.is_occupied():
-                return False, f"Diffusion failed: Initial site {site.position} is vacant."
+            initial_energy = self.lattice.calculate_site_energy(
+                agent.site_index, agent.species, self.tio2_parameters
+            )
+            action_enum = ActionType(action_idx)
+            target_site = agent.get_neighbor_site(action_enum, self.lattice.size)
 
-            x, y, z = site.position
-            dx, dy, dz = 0, 0, 0
-            if action == ActionType.DIFFUSE_X_POS:
-                dx = 1
-            elif action == ActionType.DIFFUSE_X_NEG:
-                dx = -1
-            elif action == ActionType.DIFFUSE_Y_POS:
-                dy = 1
-            elif action == ActionType.DIFFUSE_Y_NEG:
-                dy = -1
-            elif action == ActionType.DIFFUSE_Z_POS:
-                dz = 1
-            else:
-                dz = -1  # Z_NEG
-
-            target_pos = (x + dx, y + dy, z + dz)
-            nx, ny, nz = self.lattice_size
-            target_x, target_y, target_z = target_pos[0] % nx, target_pos[1] % ny, target_pos[2]
-
-            if not (0 <= target_z < nz):
-                return False, f"Diffusion failed: Target z-coordinate {target_z} is out of bounds."
-
-            target_site = self.lattice.get_site(target_x, target_y, target_z)
             if target_site is None:
-                return False, "Diffusion failed: Target site is None (should not happen)."
-            if target_site.is_occupied():
-                return False, f"Diffusion failed: Target site {target_site.position} is occupied by {target_site.species.name}."
+                return False, f"Diffusion failed: invalid move for action {action_enum.name}"
 
-            target_site.species = site.species
-            site.species = SpeciesType.VACANT
-            return True, "Diffusion successful."
+            success, reason = self.lattice.diffuse_atom(agent.site_index, target_site)
 
-        return False, "Unknown or invalid action."
+        elif action_idx == ActionType.DESORB.value:
+            # Desorption action
+            initial_energy = self.lattice.calculate_site_energy(
+                agent.site_index, agent.species, self.tio2_parameters
+            )
+            success, reason = self.lattice.desorb_atom(agent.site_index)
+        else:
+            return False, f"Unknown action index: {action_idx}"
+
+        if success:
+            self._synchronize_agents_with_lattice()
+        return success, reason
 
     def _get_observation(self) -> dict[str, Any]:
         """

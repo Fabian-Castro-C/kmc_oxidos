@@ -17,8 +17,8 @@ if TYPE_CHECKING:
     from src.rl.particle_agent import ParticleAgent
 
 
-# Total number of possible actions
-N_ACTIONS = 10
+# Total number of possible actions for an agent
+N_ACTIONS = 7
 
 
 class ActionType(Enum):
@@ -32,57 +32,68 @@ class ActionType(Enum):
     DIFFUSE_Z_POS = 4
     DIFFUSE_Z_NEG = 5
 
-    # Adsorption actions (for vacant sites)
-    ADSORB_TI = 6
-    ADSORB_O = 7
-
     # Desorption action (for Ti/O particles)
-    DESORB = 8
+    DESORB = 6
 
-    # Reaction action (for Ti particles with O neighbors)
-    REACT_TIO2 = 9
+    # The REACT_TIO2 action is currently handled implicitly by the environment
+    # when conditions are met, not as a direct agent choice.
+    # Adsorption is a global event (deposition), not an agent choice.
 
 
-def create_action_mask(agents: list[ParticleAgent]) -> npt.NDArray[np.bool_]:
+def create_action_mask(
+    agents: list[ParticleAgent], lattice_size: tuple[int, int, int]
+) -> npt.NDArray[np.bool_]:
     """
-    Creates a boolean action mask for a list of agents.
+    Creates a boolean mask for valid actions for each agent.
+
+    An action is invalid if:
+    - It's a diffusion action to an already occupied site.
+    - It's a diffusion action out of the lattice boundaries.
 
     Args:
-        agents: A list of ParticleAgent instances.
+        agents: A list of `ParticleAgent` instances.
+        lattice_size: The (x, y, z) dimensions of the lattice.
 
     Returns:
-        A boolean numpy array of shape (n_agents, N_ACTIONS), where True indicates
-        a valid action.
+        A boolean numpy array of shape (num_agents, N_ACTIONS).
+        `True` indicates a valid action, `False` indicates an invalid one.
     """
-    from src.kmc.lattice import SpeciesType
+    num_agents = len(agents)
+    mask = np.zeros((num_agents, N_ACTIONS), dtype=bool)
 
-    if not agents:
-        return np.zeros((0, N_ACTIONS), dtype=bool)
+    if num_agents == 0:
+        return mask
 
-    n_agents = len(agents)
-    mask = np.zeros((n_agents, N_ACTIONS), dtype=bool)
+    # Get all agent positions and occupied sites for efficient checking
+    agent_positions = np.array([agent.site_index for agent in agents])
+    occupied_sites = {agent.site_index for agent in agents}
+    lx, ly, lz = lattice_size
 
-    # Define valid actions for occupied and vacant sites
-    # Note: REACT_TIO2 is excluded as it's not implemented in the environment
-    occupied_actions = [
-        ActionType.DIFFUSE_X_POS.value,
-        ActionType.DIFFUSE_X_NEG.value,
-        ActionType.DIFFUSE_Y_POS.value,
-        ActionType.DIFFUSE_Y_NEG.value,
-        ActionType.DIFFUSE_Z_POS.value,
-        ActionType.DIFFUSE_Z_NEG.value,
-        ActionType.DESORB.value,
-    ]
-    vacant_actions = [
-        ActionType.ADSORB_TI.value,
-        ActionType.ADSORB_O.value,
-    ]
+    # Vectorized boundary and neighbor calculations
+    x = agent_positions % lx
+    y = (agent_positions // lx) % ly
+    z = agent_positions // (lx * ly)
 
+    # --- Diffusion Actions ---
+    # Check boundaries
+    mask[:, ActionType.DIFFUSE_X_POS.value] = x + 1 < lx
+    mask[:, ActionType.DIFFUSE_X_NEG.value] = x - 1 >= 0
+    mask[:, ActionType.DIFFUSE_Y_POS.value] = y + 1 < ly
+    mask[:, ActionType.DIFFUSE_Y_NEG.value] = y - 1 >= 0
+    mask[:, ActionType.DIFFUSE_Z_POS.value] = z + 1 < lz
+    mask[:, ActionType.DIFFUSE_Z_NEG.value] = z - 1 >= 0
+
+    # Check for collisions with other agents
+    # This part remains iterative as neighbor lookups are complex to vectorize simply
     for i, agent in enumerate(agents):
-        if agent.site.species == SpeciesType.VACANT:
-            mask[i, vacant_actions] = True
-        else:
-            mask[i, occupied_actions] = True
+        neighbors = agent.get_neighbors(lattice_size)
+        for action_type, neighbor_idx in neighbors.items():
+            if neighbor_idx in occupied_sites:
+                mask[i, action_type.value] = False
+
+    # --- Desorption Action ---
+    # Desorption is always considered a valid action for an existing particle.
+    mask[:, ActionType.DESORB.value] = True
 
     return mask
 

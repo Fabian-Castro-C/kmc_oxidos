@@ -157,6 +157,28 @@ class Lattice:
         """Get site by 1D index."""
         return self.sites[idx]
 
+    def get_surface_height(self, x: int, y: int) -> int:
+        """
+        Get the highest occupied z-coordinate in a given (x, y) column.
+
+        Args:
+            x: The x-coordinate of the column.
+            y: The y-coordinate of the column.
+
+        Returns:
+            The highest z-coordinate with an occupied site. Returns 0 if the
+            column is empty (only substrate).
+        """
+        # The _surface_height_map is updated whenever the lattice changes.
+        # For a more robust implementation if the map is not guaranteed to be
+        # up-to-date, you could fall back to a manual search:
+        # for z in range(self.nz - 1, -1, -1):
+        #     site = self.get_site(x, y, z)
+        #     if site.is_occupied():
+        #         return z
+        # return 0
+        return self._surface_height_map[x, y]
+
     def _update_surface_sites(self) -> None:
         """Update the set of surface sites (vacant sites available for deposition)."""
         self.surface_sites.clear()
@@ -192,7 +214,10 @@ class Lattice:
 
         site.species = species
         self._update_coordination(site_idx)
-        self._update_surface_sites()
+        # self._update_surface_sites() # This is slow, rely on local updates
+        x, y, z = site.position
+        if z > self._surface_height_map[x, y]:
+            self._surface_height_map[x, y] = z
 
     def remove_atom(self, site_idx: int) -> SpeciesType:
         """

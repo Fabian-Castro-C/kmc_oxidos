@@ -35,7 +35,8 @@ CONFIG = {
     "run_name": f"run_{int(time.time())}",
     "torch_seed": 42,
     "lattice_size": (5, 5, 8),
-    "deposition_flux": 0.1,  # Monolayers per second, analogous to QCM
+    "deposition_flux_ti": 0.1,  # Ti monolayers per second
+    "deposition_flux_o": 0.2,  # O monolayers per second (often higher in practice)
     "total_timesteps": 512,  # Short run for debugging
     "num_steps": 128,  # Number of steps to run for each environment per update
     "learning_rate": 3e-4,
@@ -76,7 +77,12 @@ def main() -> None:
         max_steps=CONFIG["num_steps"],
     )
     n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
-    deposition_logit = torch.tensor(np.log(CONFIG["deposition_flux"] * n_sites)).to(device)
+    deposition_logit_ti = torch.tensor(
+        np.log(CONFIG["deposition_flux_ti"] * n_sites)
+    ).to(device)
+    deposition_logit_o = torch.tensor(
+        np.log(CONFIG["deposition_flux_o"] * n_sites)
+    ).to(device)
 
     # Actor-Critic Models
     # The Actor acts on local observations, Critic on global features
@@ -95,8 +101,10 @@ def main() -> None:
 
     print("Starting training...")
     print(f"Device: {device}")
-    print(f"Deposition Flux (Φ): {CONFIG['deposition_flux']} ML/s")
-    print(f"Calculated Deposition Logit: {deposition_logit.item():.4f}")
+    print(f"Deposition Flux (Ti): {CONFIG['deposition_flux_ti']} ML/s")
+    print(f"Deposition Flux (O): {CONFIG['deposition_flux_o']} ML/s")
+    print(f"Calculated Deposition Logit (Ti): {deposition_logit_ti.item():.4f}")
+    print(f"Calculated Deposition Logit (O): {deposition_logit_o.item():.4f}")
     print(f"Actor Params: {sum(p.numel() for p in actor.parameters()):,}")
     print(f"Critic Params: {sum(p.numel() for p in critic.parameters()):,}")
 
@@ -154,32 +162,40 @@ def main() -> None:
                     action_mask_tensor = torch.from_numpy(action_mask).to(device)
                     diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
 
-                    # Flatten diffusion logits and combine with the fixed deposition logit
+                    # Flatten diffusion logits and combine with the fixed deposition logits
                     all_possible_logits = torch.cat(
-                        [diffusion_logits.flatten(), deposition_logit.unsqueeze(0)]
+                        [
+                            diffusion_logits.flatten(),
+                            deposition_logit_ti.unsqueeze(0),
+                            deposition_logit_o.unsqueeze(0),
+                        ]
                     )
                 else:
                     # No agents, so no diffusion actions to mask
                     all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
                     # Only deposition is possible
-                    all_possible_logits = deposition_logit.unsqueeze(0)
+                    all_possible_logits = torch.cat(
+                        [deposition_logit_ti.unsqueeze(0), deposition_logit_o.unsqueeze(0)]
+                    )
 
             # Gumbel-Max for global action selection across all possibilities
             gumbel_action_idx, log_prob = select_action_gumbel_max(all_possible_logits)
             all_logprobs.append(log_prob)
 
-
             # Deconstruct the chosen action
-            if num_agents > 0 and gumbel_action_idx < num_agents * action_dim:
+            diffusion_action_space_size = num_agents * action_dim
+            if gumbel_action_idx < diffusion_action_space_size:
                 # It's a diffusion action
                 agent_idx = gumbel_action_idx // action_dim
                 action_idx = gumbel_action_idx % action_dim
+                action = (agent_idx, action_idx)
+            elif gumbel_action_idx == diffusion_action_space_size:
+                # It's a Ti deposition action
+                action = "DEPOSIT_TI"
             else:
-                # It's a deposition action
-                agent_idx = -1 # Placeholder
-                action_idx = 9  # Deposition action
+                # It's an O deposition action
+                action = "DEPOSIT_O"
 
-            action = (agent_idx, action_idx)
             all_actions.append(action)
 
 
@@ -240,8 +256,8 @@ def main() -> None:
 
 
                 # Determine which action was taken
-                _agent_idx, action_idx = all_actions[i]
-                is_deposition = _agent_idx == -1
+                taken_action = all_actions[i]
+                is_deposition = isinstance(taken_action, str)
 
                 # We only update the policy for diffusion actions, as deposition is fixed
                 if not is_deposition and num_agents > 0:
@@ -252,20 +268,27 @@ def main() -> None:
                     # Apply the saved mask for this specific step
                     action_mask = torch.from_numpy(all_action_masks[i]).to(device)
                     if action_mask.shape[0] == diffusion_logits.shape[0]:
-                         diffusion_logits[~action_mask] = -1e9
+                        diffusion_logits[~action_mask] = -1e9
                     else:
                         # This can happen on the last step of an episode if the number of agents changes.
                         # We can skip this update as it's a minor edge case.
                         continue
 
                     all_possible_logits = torch.cat(
-                        [diffusion_logits.flatten(), deposition_logit.unsqueeze(0)]
+                        [
+                            diffusion_logits.flatten(),
+                            deposition_logit_ti.unsqueeze(0),
+                            deposition_logit_o.unsqueeze(0),
+                        ]
                     )
                     dist = torch.distributions.Categorical(logits=all_possible_logits)
 
                     # Find the index of the action taken in the flattened logit tensor
+                    _agent_idx, action_idx = taken_action
                     gumbel_action_idx = _agent_idx * action_dim + action_idx
-                    new_logprob = dist.log_prob(torch.tensor(gumbel_action_idx).to(device))
+                    new_logprob = dist.log_prob(
+                        torch.tensor(gumbel_action_idx).to(device)
+                    )
                     entropy = dist.entropy().mean()
 
                     new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
@@ -310,17 +333,22 @@ def main() -> None:
         writer.add_scalar("charts/mean_reward", mean_reward, global_step)
 
         # Log failure reasons for a few steps to debug
-        if update == 1:
+        if update == 1 and env.step_info:
             print("\n--- Sample of Action Outcomes (Update 1) ---")
-            for i in range(min(20, len(all_obs))):  # Log first 20 steps
+            for i in range(min(20, len(env.step_info))):  # Log first 20 steps
                 info = env.step_info[i]
+                action_str = (
+                    info["executed_action"]
+                    if isinstance(info["executed_action"], str)
+                    else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                )
                 if not info["success"]:
                     print(
-                        f"Step {i}: Action {info['executed_action']} failed. Reason: {info['failure_reason']}"
+                        f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
                     )
                 else:
                     print(
-                        f"Step {i}: Action {info['executed_action']} succeeded. Reward: {info['reward']:.4f}"
+                        f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
                     )
 
         print(
