@@ -162,7 +162,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self._step_penalty = 0.005  # Small penalty per step to encourage efficiency
 
         # Observation caching: cache agent observations to avoid recomputation
-        self._observation_cache: dict[int, npt.NDArray[np.float32]] = {}  # site_idx -> observation vector
+        self._observation_cache: dict[
+            int, npt.NDArray[np.float32]
+        ] = {}  # site_idx -> observation vector
         self._dirty_observations: set[int] = set()  # Set of site_idx that need recomputation
 
     def reset(
@@ -390,7 +392,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
     def _add_agent(self, site_idx: int) -> None:
         """
         Add a new agent for a given site.
-        
+
         Args:
             site_idx: Index of the site that became an agent.
         """
@@ -404,7 +406,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
     def _remove_agent(self, site_idx: int) -> None:
         """
         Remove an agent at a given site.
-        
+
         Args:
             site_idx: Index of the site that is no longer an agent.
         """
@@ -425,7 +427,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
     def _update_agent_at_site(self, site_idx: int) -> None:
         """
         Update or create/remove agent at a specific site based on current lattice state.
-        
+
         Args:
             site_idx: Index of the site to update.
         """
@@ -706,7 +708,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Remove all sites from this column from valid list
         self._valid_deposition_sites = [
-            idx for idx in self._valid_deposition_sites
+            idx
+            for idx in self._valid_deposition_sites
             if self.lattice.sites[idx].position[0] != x or self.lattice.sites[idx].position[1] != y
         ]
 
@@ -747,9 +750,12 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Opposite diffusion pairs (value difference of 1)
         opposite_pairs = [
-            (0, 1), (1, 0),  # X_POS <-> X_NEG
-            (2, 3), (3, 2),  # Y_POS <-> Y_NEG
-            (4, 5), (5, 4),  # Z_POS <-> Z_NEG
+            (0, 1),
+            (1, 0),  # X_POS <-> X_NEG
+            (2, 3),
+            (3, 2),  # Y_POS <-> Y_NEG
+            (4, 5),
+            (5, 4),  # Z_POS <-> Z_NEG
         ]
 
         if (action_0, action_1) in opposite_pairs:
@@ -758,15 +764,13 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Check for 2-step loops: A -> B -> A -> B (same site, same action sequence)
         if len(agent_actions) >= 4:
             last_4 = agent_actions[-4:]
-            if (last_4[0] == last_4[2] and last_4[1] == last_4[3] and
-                last_4[0] != last_4[1]):
+            if last_4[0] == last_4[2] and last_4[1] == last_4[3] and last_4[0] != last_4[1]:
                 return True
 
         # Check for 3-action loops: A -> B -> C -> A -> B -> C
         if len(agent_actions) >= 6:
             last_6 = agent_actions[-6:]
-            if (last_6[0] == last_6[3] and last_6[1] == last_6[4] and
-                last_6[2] == last_6[5]):
+            if last_6[0] == last_6[3] and last_6[1] == last_6[4] and last_6[2] == last_6[5]:
                 return True
 
         return False

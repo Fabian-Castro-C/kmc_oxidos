@@ -37,8 +37,8 @@ from src.rl.shared_policy import Actor, Critic
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="[%(asctime)s] %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
@@ -138,12 +138,8 @@ def main() -> None:
         max_steps=CONFIG.get("max_steps_per_episode", CONFIG["num_steps"]),
     )
     n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
-    deposition_logit_ti = torch.tensor(
-        np.log(CONFIG["deposition_flux_ti"] * n_sites)
-    ).to(device)
-    deposition_logit_o = torch.tensor(
-        np.log(CONFIG["deposition_flux_o"] * n_sites)
-    ).to(device)
+    deposition_logit_ti = torch.tensor(np.log(CONFIG["deposition_flux_ti"] * n_sites)).to(device)
+    deposition_logit_o = torch.tensor(np.log(CONFIG["deposition_flux_o"] * n_sites)).to(device)
 
     # Actor-Critic Models
     # The Actor acts on local observations, Critic on global features
@@ -161,12 +157,10 @@ def main() -> None:
         obs_dim=obs_dim,
         action_dim=action_dim,
         hidden_dims=actor_hidden,
-        activation=actor_activation
+        activation=actor_activation,
     ).to(device)
     critic = Critic(
-        obs_dim=global_obs_dim,
-        hidden_dims=critic_hidden,
-        activation=critic_activation
+        obs_dim=global_obs_dim, hidden_dims=critic_hidden, activation=critic_activation
     ).to(device)
 
     # Optimizer - Note: deposition_logit is NOT included here as it's a fixed parameter
@@ -191,7 +185,7 @@ def main() -> None:
     num_updates = CONFIG["total_timesteps"] // CONFIG["num_steps"]
 
     # Best model tracking
-    best_mean_reward = float('-inf')
+    best_mean_reward = float("-inf")
     episode_count = 0
 
     # Rollout storage
@@ -202,7 +196,7 @@ def main() -> None:
     all_rewards = []  # List of floats
     all_dones = []  # List of bools
     all_values = []  # List of tensors
-    all_action_masks = [] # List of action masks
+    all_action_masks = []  # List of action masks
 
     next_obs, _ = env.reset()
     agent_obs = next_obs["agent_observations"]
@@ -279,7 +273,6 @@ def main() -> None:
 
             all_actions.append(action)
 
-
             # Execute action in the environment
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
@@ -294,7 +287,9 @@ def main() -> None:
         with torch.no_grad():
             # Get value of the last state
             if len(agent_obs) > 0:
-                next_value = critic(torch.from_numpy(global_obs).unsqueeze(0).to(device)).reshape(1, -1)
+                next_value = critic(torch.from_numpy(global_obs).unsqueeze(0).to(device)).reshape(
+                    1, -1
+                )
             else:
                 next_value = critic(torch.zeros(1, global_obs_dim).to(device)).reshape(1, -1)
 
@@ -331,27 +326,27 @@ def main() -> None:
         # Optimizing the policy and value network
         for _epoch in range(CONFIG["update_epochs"]):
             logger.info(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
-            
+
             # Shuffle indices for each epoch
             indices = np.random.permutation(len(all_obs))
-            
+
             for mb in range(num_minibatches):
                 if mb > 0 and mb % 4 == 0:
                     logger.info(f"    Processing minibatch {mb}/{num_minibatches}...")
-                
+
                 # Get minibatch indices
                 start_idx = mb * minibatch_size
                 end_idx = min((mb + 1) * minibatch_size, len(all_obs))
                 mb_indices = indices[start_idx:end_idx]
-                
+
                 # Accumulate loss over minibatch
                 total_pg_loss = 0.0
                 total_v_loss = 0.0
                 total_entropy = 0.0
                 num_updates = 0
-                
+
                 optimizer.zero_grad()
-                
+
                 for i in mb_indices:
                     current_agent_obs = all_obs[i]["agent_observations"]
                     current_global_obs = all_obs[i]["global_features"]
@@ -372,7 +367,7 @@ def main() -> None:
                         if action_mask.shape[0] != diffusion_logits.shape[0]:
                             # Skip if shape mismatch (rare edge case)
                             continue
-                        
+
                         diffusion_logits[~action_mask] = -1e9
 
                         all_possible_logits = torch.cat(
@@ -387,12 +382,12 @@ def main() -> None:
                         # Find the index of the action taken in the flattened logit tensor
                         _agent_idx, action_idx = taken_action
                         gumbel_action_idx = _agent_idx * action_dim + action_idx
-                        new_logprob = dist.log_prob(
-                            torch.tensor(gumbel_action_idx).to(device)
-                        )
+                        new_logprob = dist.log_prob(torch.tensor(gumbel_action_idx).to(device))
                         entropy = dist.entropy()
 
-                        new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
+                        new_value = critic(
+                            torch.from_numpy(current_global_obs).unsqueeze(0).to(device)
+                        )
 
                         # Policy loss
                         logratio = new_logprob - b_logprobs[i]
@@ -410,16 +405,16 @@ def main() -> None:
 
                         # Total loss (accumulate, don't average yet)
                         loss = pg_loss - entropy * CONFIG["ent_coef"] + v_loss * CONFIG["vf_coef"]
-                        
+
                         # Backward pass (accumulates gradients)
                         loss.backward()
-                        
+
                         # Track for logging
                         total_pg_loss += pg_loss.item()
                         total_v_loss += v_loss.item()
                         total_entropy += entropy.item()
                         num_updates += 1
-                
+
                 # Update weights once per minibatch
                 if num_updates > 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -452,13 +447,9 @@ def main() -> None:
                     else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
                 )
                 if not info["success"]:
-                    print(
-                        f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
-                    )
+                    print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
                 else:
-                    print(
-                        f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
-                    )
+                    print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
 
         # Log for last update to see what's happening
         if update == num_updates and env.step_info:
@@ -471,17 +462,11 @@ def main() -> None:
                     else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
                 )
                 if not info["success"]:
-                    print(
-                        f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
-                    )
+                    print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
                 else:
-                    print(
-                        f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
-                    )
+                    print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
 
-        print(
-            f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}"
-        )
+        print(f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}")
 
         # Episode tracking and model saving
         episode_count += 1
@@ -498,7 +483,9 @@ def main() -> None:
                 },
                 checkpoint_path,
             )
-            logger.info(f"Checkpoint saved to {checkpoint_path} (Episode {episode_count}, Reward: {mean_reward:.4f})")
+            logger.info(
+                f"Checkpoint saved to {checkpoint_path} (Episode {episode_count}, Reward: {mean_reward:.4f})"
+            )
 
         # Track and save best model
         if mean_reward > best_mean_reward:
@@ -539,7 +526,9 @@ def main() -> None:
         model_path,
     )
     logger.info(f"Training finished. Final model saved to {model_path}")
-    logger.info(f"Best model (reward: {best_mean_reward:.4f}) saved to {model_dir / 'best_model.pt'}")
+    logger.info(
+        f"Best model (reward: {best_mean_reward:.4f}) saved to {model_dir / 'best_model.pt'}"
+    )
     env.close()
     writer.close()
 
