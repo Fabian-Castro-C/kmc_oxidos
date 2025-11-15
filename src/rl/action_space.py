@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import numpy.typing as npt
 
+from src.kmc.lattice import SpeciesType
+
 if TYPE_CHECKING:
     from src.rl.particle_agent import ParticleAgent
 
@@ -41,6 +43,29 @@ class ActionType(Enum):
 
     # Reaction action (for Ti particles with O neighbors)
     REACT_TIO2 = 9
+
+
+# --- Action Sets for Masking ---
+
+DIFFUSION_ACTIONS: set[ActionType] = {
+    ActionType.DIFFUSE_X_POS,
+    ActionType.DIFFUSE_X_NEG,
+    ActionType.DIFFUSE_Y_POS,
+    ActionType.DIFFUSE_Y_NEG,
+    ActionType.DIFFUSE_Z_POS,
+    ActionType.DIFFUSE_Z_NEG,
+}
+
+ADSORPTION_ACTIONS: set[ActionType] = {
+    ActionType.ADSORB_TI,
+    ActionType.ADSORB_O,
+}
+
+# Actions valid for an agent on an OCCUPIED site
+VALID_ACTIONS_OCCUPIED: set[ActionType] = DIFFUSION_ACTIONS | {ActionType.DESORB}
+
+# Actions valid for an agent on a VACANT site
+VALID_ACTIONS_VACANT: set[ActionType] = ADSORPTION_ACTIONS
 
 
 def get_action_mask(agent: ParticleAgent) -> npt.NDArray[np.bool_]:
@@ -150,3 +175,37 @@ def validate_action_mask(mask: npt.NDArray[np.bool_]) -> bool:
         True if mask has at least one True value.
     """
     return np.any(mask)
+
+
+def create_action_mask(agents: list[ParticleAgent]) -> npt.NDArray[np.bool_]:
+    """
+    Creates a boolean mask for valid actions for each agent.
+
+    The mask has shape (num_agents, N_ACTIONS).
+    `mask[i, j] = True` if action `j` is valid for agent `i`.
+
+    Args:
+        agents: A list of active ParticleAgent instances.
+
+    Returns:
+        A numpy boolean array representing the action mask.
+    """
+    if not agents:
+        return np.empty((0, N_ACTIONS), dtype=bool)
+
+    num_agents = len(agents)
+    mask = np.zeros((num_agents, N_ACTIONS), dtype=bool)
+
+    for i, agent in enumerate(agents):
+        # Determine the set of valid actions based on the site's occupancy
+        valid_actions = (
+            VALID_ACTIONS_OCCUPIED
+            if agent.site.species != SpeciesType.VACANT
+            else VALID_ACTIONS_VACANT
+        )
+
+        # Set the corresponding indices in the mask to True
+        for action in valid_actions:
+            mask[i, action.value] = True
+
+    return mask
