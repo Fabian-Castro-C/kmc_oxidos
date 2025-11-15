@@ -58,7 +58,7 @@ PPO_CONFIG = {
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
-    "update_epochs": 10,  # Number of epochs per PPO update
+    "update_epochs": 3,  # Number of epochs per PPO update (reduced for speed with variable agents)
 }
 
 # ============================================================================

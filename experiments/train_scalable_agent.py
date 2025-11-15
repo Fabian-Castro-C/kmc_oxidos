@@ -197,6 +197,7 @@ def main() -> None:
     all_dones = []  # List of bools
     all_values = []  # List of tensors
     all_action_masks = []  # List of action masks
+    all_diffusion_logits = []  # Cached diffusion logits to avoid recalculation
 
     next_obs, _ = env.reset()
     agent_obs = next_obs["agent_observations"]
@@ -235,6 +236,10 @@ def main() -> None:
                     action_mask = env.get_action_mask()
                     all_action_masks.append(action_mask)
                     action_mask_tensor = torch.from_numpy(action_mask).to(device)
+
+                    # Cache the diffusion logits BEFORE masking for reuse in PPO
+                    all_diffusion_logits.append(diffusion_logits.cpu().numpy())
+
                     diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
 
                     # Flatten diffusion logits and combine with the fixed deposition logits
@@ -248,6 +253,7 @@ def main() -> None:
                 else:
                     # No agents, so no diffusion actions to mask
                     all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
+                    all_diffusion_logits.append(np.zeros((0, action_dim), dtype=np.float32))
                     # Only deposition is possible
                     all_possible_logits = torch.cat(
                         [deposition_logit_ti.unsqueeze(0), deposition_logit_o.unsqueeze(0)]
@@ -358,7 +364,8 @@ def main() -> None:
 
                     # We only update the policy for diffusion actions, as deposition is fixed
                     if not is_deposition and num_agents > 0:
-                        # Recalculate log_probs, entropy, and values
+                        # Recalculate log_probs, entropy, and values with current policy
+                        # NOTE: We still need to call actor() because policy parameters changed
                         obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
                         diffusion_logits = actor(obs_tensor)
 
@@ -503,7 +510,8 @@ def main() -> None:
             logger.info(f"New best model saved! Episode {episode_count}, Reward: {mean_reward:.4f}")
 
         # Clear rollout storage
-        all_obs, all_actions, all_logprobs, all_rewards, all_dones, all_values, all_action_masks = (
+        all_obs, all_actions, all_logprobs, all_rewards, all_dones, all_values, all_action_masks, all_diffusion_logits = (
+            [],
             [],
             [],
             [],
