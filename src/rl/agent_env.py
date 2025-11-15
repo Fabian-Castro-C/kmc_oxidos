@@ -135,13 +135,13 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             params=self.tio2_params
         )
         self.agents: list = []
+        self.site_to_agent_map: dict[int, int] = {}  # Maps site_idx to agent index in self.agents
 
         # Episode state
         self.step_count = 0
         self.total_reward = 0.0
         self.episode_info: dict[str, Any] = {}
         self.prev_omega: float = 0.0  # Track grand potential for reward calculation
-        self.step_info: list[dict[str, Any]] = []
         self.step_info: list[dict[str, Any]] = []  # Store info for logging
 
     def reset(
@@ -190,8 +190,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         )
         self.energy_calculator = SystemEnergyCalculator(params=self.tio2_params)
 
-        # Create initial agents (surface sites)
-        self._update_agents()
+        # Create initial agents (surface sites) and build the map
+        self._rebuild_agents()
 
         # Reset episode state
         self.step_count = 0
@@ -253,10 +253,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             _action_enum = ActionType(action_idx)
             success, reason = self._execute_agent_action(agent_idx, action_idx)
 
-        # Update agents list after lattice modification
-        if success:
-            self._update_agents()
-
         # Calculate reward based on change in grand potential
         reward = self._calculate_reward()
         if not success:
@@ -302,9 +298,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             )
             info.update(self.episode_info)
 
-        # Store step info for logging
-        self.step_info.append(info)
-
         observation = self._get_observation()
 
         return observation, reward, terminated, truncated, info
@@ -319,12 +312,83 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """
         return create_action_mask(self.agents, self.lattice.size, self.lattice)
 
-    def _update_agents(self) -> None:
+    def _rebuild_agents(self) -> None:
         """
-        Efficiently update the list of active agents.
-        Agents are top-most atoms or vacant surface sites.
+        Rebuild the full list of active agents and the site-to-agent map.
+        Only called at reset, not during step execution.
         """
         self.agents = create_agents_from_lattice(self.lattice)
+        self.site_to_agent_map = {agent.site_idx: idx for idx, agent in enumerate(self.agents)}
+
+    def _add_agent(self, site_idx: int) -> None:
+        """
+        Add a new agent for a given site.
+        
+        Args:
+            site_idx: Index of the site that became an agent.
+        """
+        from src.rl.particle_agent import ParticleAgent
+        
+        new_agent = ParticleAgent(site_idx=site_idx, lattice=self.lattice)
+        agent_idx = len(self.agents)
+        self.agents.append(new_agent)
+        self.site_to_agent_map[site_idx] = agent_idx
+
+    def _remove_agent(self, site_idx: int) -> None:
+        """
+        Remove an agent at a given site.
+        
+        Args:
+            site_idx: Index of the site that is no longer an agent.
+        """
+        if site_idx not in self.site_to_agent_map:
+            return
+        
+        agent_idx = self.site_to_agent_map[site_idx]
+        
+        # Remove from agents list (swap with last element for O(1) removal)
+        last_agent = self.agents[-1]
+        if agent_idx < len(self.agents) - 1:
+            self.agents[agent_idx] = last_agent
+            self.site_to_agent_map[last_agent.site_idx] = agent_idx
+        
+        self.agents.pop()
+        del self.site_to_agent_map[site_idx]
+
+    def _update_agent_at_site(self, site_idx: int) -> None:
+        """
+        Update or create/remove agent at a specific site based on current lattice state.
+        
+        Args:
+            site_idx: Index of the site to update.
+        """
+        site = self.lattice.sites[site_idx]
+        should_be_agent = site.is_occupied()
+        is_agent = site_idx in self.site_to_agent_map
+        
+        if should_be_agent and not is_agent:
+            self._add_agent(site_idx)
+        elif not should_be_agent and is_agent:
+            self._remove_agent(site_idx)
+
+    def _update_affected_agents(self, affected_site_indices: list[int]) -> None:
+        """
+        Update agents for affected sites and their neighbors.
+        This is called after deposition, desorption, or diffusion events.
+        
+        Args:
+            affected_site_indices: Indices of sites that changed.
+        """
+        sites_to_check = set(affected_site_indices)
+        
+        # Add neighbors of affected sites
+        for site_idx in affected_site_indices:
+            site = self.lattice.sites[site_idx]
+            sites_to_check.update(site.neighbors)
+        
+        # Update each affected site
+        for site_idx in sites_to_check:
+            self._update_agent_at_site(site_idx)
 
     def _execute_deposition(self, species: SpeciesType) -> tuple[bool, str]:
         """
@@ -354,7 +418,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                         # Found valid deposition site with support (below is SUBSTRATE, TI, or O)
                         success, reason = self.lattice.deposit_atom(site_idx, species)
                         if success:
-                            self._update_agents()
+                            # Update only affected agents incrementally
+                            self._update_affected_agents([site_idx])
                         return success, reason
                     # This vacant site doesn't have support, check next z level
 
@@ -383,16 +448,22 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             if target_site is None:
                 return False, f"Diffusion failed: invalid move for action {action_enum.name}"
 
-            success, reason = self.lattice.diffuse_atom(agent.site_idx, target_site)
+            from_site_idx = agent.site_idx
+            success, reason = self.lattice.diffuse_atom(from_site_idx, target_site)
+            if success:
+                # Update only affected agents incrementally (both source and destination)
+                self._update_affected_agents([from_site_idx, target_site])
 
         elif action_idx == ActionType.DESORB.value:
             # Desorption action
-            success, reason = self.lattice.desorb_atom(agent.site_idx)
+            from_site_idx = agent.site_idx
+            success, reason = self.lattice.desorb_atom(from_site_idx)
+            if success:
+                # Update only affected agents incrementally
+                self._update_affected_agents([from_site_idx])
         else:
             return False, f"Unknown action index: {action_idx}"
 
-        if success:
-            self._update_agents()
         return success, reason
 
     def _get_observation(self) -> dict[str, Any]:
