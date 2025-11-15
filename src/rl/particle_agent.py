@@ -13,36 +13,15 @@ extended to handle deposition systems (adsorption/desorption/reaction).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
 
+from .action_space import ActionType
+
 if TYPE_CHECKING:
     from src.kmc.lattice import Lattice, SpeciesType
-
-
-class ActionType(Enum):
-    """Types of actions an agent can take."""
-
-    # Diffusion actions (for Ti/O particles)
-    DIFFUSE_X_POS = 0
-    DIFFUSE_X_NEG = 1
-    DIFFUSE_Y_POS = 2
-    DIFFUSE_Y_NEG = 3
-    DIFFUSE_Z_POS = 4
-    DIFFUSE_Z_NEG = 5
-
-    # Adsorption actions (for vacant sites)
-    ADSORB_TI = 6
-    ADSORB_O = 7
-
-    # Desorption action (for Ti/O particles)
-    DESORB = 8
-
-    # Reaction action (for Ti particles with O neighbors)
-    REACT_TIO2 = 9
 
 
 @dataclass
@@ -292,36 +271,40 @@ class ParticleAgent:
 
 def create_agents_from_lattice(lattice: Lattice) -> list[ParticleAgent]:
     """
-    Create particle agents for all occupied sites and surface vacant sites.
+    Create a list of agents from the current lattice state.
 
-    Args:
-        lattice: The KMC lattice.
+    Agents are defined as:
+    1. All occupied sites on the surface (top-most atoms).
+    2. All vacant sites on or just above the surface.
 
-    Returns:
-        List of ParticleAgent instances.
+    This uses the optimized `get_surface_sites` and `get_vacant_surface_sites`
+    methods from the Lattice class.
     """
-    from src.kmc.lattice import SpeciesType
-
     agents = []
-    nx, ny, nz = lattice.size
+    nx, ny, _ = lattice.size
+    
+    # A helper function to calculate index from position
+    def get_site_index(pos: tuple[int, int, int]) -> int:
+        x, y, z = pos
+        return x + y * nx + z * nx * ny
 
-    for idx, site in enumerate(lattice.sites):
-        # Create agent for occupied sites (Ti, O)
-        if site.species in [SpeciesType.TI, SpeciesType.O]:
-            agents.append(ParticleAgent(idx, lattice))
+    # Add agents for occupied surface sites
+    surface_sites = lattice.get_surface_sites()
+    for site in surface_sites:
+        if site.is_occupied():
+            site_idx = get_site_index(site.position)
+            agents.append(ParticleAgent(site_idx=site_idx, lattice=lattice))
 
-        # Create agent for surface vacant sites
-        elif site.species == SpeciesType.VACANT:
-            x, y, z = site.position
-            # Surface: z == 0 or has occupied neighbor below
-            is_surface = z == 0
-            if not is_surface and z > 0:
-                idx_below = x + y * nx + (z - 1) * nx * ny
-                if 0 <= idx_below < len(lattice.sites):
-                    site_below = lattice.sites[idx_below]
-                    is_surface = site_below.species != SpeciesType.VACANT
-
-            if is_surface:
-                agents.append(ParticleAgent(idx, lattice))
-
+    # Add agents for vacant surface sites
+    vacant_surface_sites = lattice.get_vacant_surface_sites()
+    for site in vacant_surface_sites:
+        # The vacant sites can include occupied sites' locations if they are near the surface.
+        # We only want to add agents for truly vacant spots.
+        if not site.is_occupied():
+            site_idx = get_site_index(site.position)
+            # Check to prevent adding a duplicate agent if a site is in both lists
+            is_already_agent = any(agent.site_idx == site_idx for agent in agents)
+            if not is_already_agent:
+                agents.append(ParticleAgent(site_idx=site_idx, lattice=lattice))
+    
     return agents

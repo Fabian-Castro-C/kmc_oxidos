@@ -93,6 +93,10 @@ class Lattice:
 
         # Initialize sites
         self.sites: list[Site] = []
+        self._site_map: dict[tuple[int, int, int], int] = {}
+        self._surface_height_map: npt.NDArray[np.int16] = np.zeros(
+            (self.size[0], self.size[1]), dtype=np.int16
+        )
         self._initialize_sites()
         self._build_neighbor_lists()
 
@@ -111,6 +115,7 @@ class Lattice:
                     species = SpeciesType.SUBSTRATE if iz == 0 else SpeciesType.VACANT
                     site = Site(position=position, species=species, site_id=site_id)
                     self.sites.append(site)
+                    self._site_map[position] = site_id
                     site_id += 1
 
     def _build_neighbor_lists(self) -> None:
@@ -376,6 +381,45 @@ class Lattice:
                 candidates.append(neighbor_idx)
 
         return candidates
+
+    def get_surface_sites(self) -> list[Site]:
+        """
+        Get all sites on the current surface.
+
+        A surface site is the highest occupied site in each (x, y) column,
+        or the site at z=0 if the column is empty. This is optimized by
+        using the pre-computed surface height map.
+        """
+        surface_sites = []
+        for x in range(self.size[0]):
+            for y in range(self.size[1]):
+                z = self._surface_height_map[x, y]
+                site = self.get_site(x, y, z)
+                if site:
+                    surface_sites.append(site)
+        return surface_sites
+
+    def get_vacant_surface_sites(self) -> list[Site]:
+        """
+        Get all vacant sites on or just above the current surface.
+
+        These are potential sites for adsorption.
+        """
+        vacant_sites = []
+        for x in range(self.size[0]):
+            for y in range(self.size[1]):
+                z = self._surface_height_map[x, y]
+                # Check the site at the surface height
+                site_at_surface = self.get_site(x, y, z)
+                if site_at_surface and not site_at_surface.is_occupied():
+                    vacant_sites.append(site_at_surface)
+
+                # Check the site just above the surface
+                if z + 1 < self.size[2]:
+                    site_above_surface = self.get_site(x, y, z + 1)
+                    if site_above_surface:
+                        vacant_sites.append(site_above_surface)
+        return vacant_sites
 
     def __repr__(self) -> str:
         """String representation."""

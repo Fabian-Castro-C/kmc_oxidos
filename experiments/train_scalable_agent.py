@@ -24,6 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from src.data.tio2_parameters import TiO2Parameters
 from src.rl.action_selection import select_action_gumbel_max
+from src.rl.action_space import N_ACTIONS
 from src.rl.agent_env import AgentBasedTiO2Env
 from src.rl.shared_policy import Actor, Critic
 
@@ -34,7 +35,8 @@ CONFIG = {
     "run_name": f"run_{int(time.time())}",
     "torch_seed": 42,
     "lattice_size": (5, 5, 8),
-    "total_timesteps": 1_000_000,
+    "deposition_flux": 0.1,  # Monolayers per second, analogous to QCM
+    "total_timesteps": 10240,  # Short run for testing
     "num_steps": 2048,  # Number of steps to run for each environment per update
     "learning_rate": 3e-4,
     "gamma": 0.99,
@@ -46,7 +48,7 @@ CONFIG = {
     "adam_eps": 1e-5,
     "target_kl": None,
     "update_epochs": 10,
-    "save_path": Path("models/"),
+    "results_path": Path("experiments/results"),
 }
 
 
@@ -56,25 +58,35 @@ def main() -> None:
     torch.manual_seed(CONFIG["torch_seed"])
     np.random.seed(CONFIG["torch_seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    writer = SummaryWriter(f"runs/{CONFIG['run_name']}")
-    CONFIG["save_path"].mkdir(parents=True, exist_ok=True)
 
-    # Environment
+    # Create a specific directory for this run
+    run_dir = CONFIG["results_path"] / CONFIG["run_name"]
+    log_dir = run_dir / "logs"
+    model_dir = run_dir / "models"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    writer = SummaryWriter(str(log_dir))
+
+    # Environment & Deposition Logit
     params = TiO2Parameters()
     env = AgentBasedTiO2Env(
         lattice_size=CONFIG["lattice_size"],
         tio2_parameters=params,
         max_steps=CONFIG["num_steps"],
     )
+    n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
+    deposition_logit = torch.tensor(np.log(CONFIG["deposition_flux"] * n_sites)).to(device)
 
     # Actor-Critic Models
-    # The Actor acts on local observations, Critic on global (mean) observations
-    obs_dim = env.observation_space["agents"].shape[1]
-    action_dim = env.action_space.n
+    # The Actor acts on local observations, Critic on global features
+    obs_dim = env.single_agent_observation_space.shape[0]
+    global_obs_dim = env.global_feature_space.shape[0]
+    action_dim = N_ACTIONS
     actor = Actor(obs_dim=obs_dim, action_dim=action_dim).to(device)
-    critic = Critic(obs_dim=obs_dim).to(device)
+    critic = Critic(obs_dim=global_obs_dim).to(device)
 
-    # Optimizer
+    # Optimizer - Note: deposition_logit is NOT included here as it's a fixed parameter
     optimizer = optim.Adam(
         list(actor.parameters()) + list(critic.parameters()),
         lr=CONFIG["learning_rate"],
@@ -83,6 +95,8 @@ def main() -> None:
 
     print("Starting training...")
     print(f"Device: {device}")
+    print(f"Deposition Flux (Φ): {CONFIG['deposition_flux']} ML/s")
+    print(f"Calculated Deposition Logit: {deposition_logit.item():.4f}")
     print(f"Actor Params: {sum(p.numel() for p in actor.parameters()):,}")
     print(f"Critic Params: {sum(p.numel() for p in critic.parameters()):,}")
 
@@ -101,65 +115,81 @@ def main() -> None:
     all_values = []  # List of tensors
 
     next_obs, _ = env.reset()
-    next_done = False
+    agent_obs = next_obs["agent_observations"]
+    global_obs = next_obs["global_features"]
+    next_done = torch.zeros(1).to(device)
 
     for update in range(1, num_updates + 1):
+        print(f"\n--- Starting Update {update}/{num_updates} ---")
         # --- Rollout Collection Phase ---
+        print("Collecting rollouts...")
         for _step in range(CONFIG["num_steps"]):
+            if _step > 0 and _step % 256 == 0:
+                print(f"  Rollout step {_step}/{CONFIG['num_steps']}...")
             global_step += 1
             all_dones.append(next_done)
-            all_obs.append(next_obs)
+            all_obs.append({"agent_observations": agent_obs, "global_features": global_obs})
 
             # Get agent observations from the environment state
-            agent_obs = next_obs["agents"]
-            num_agents = agent_obs.shape[0]
+            num_agents = len(agent_obs)
 
+            # Centralized Critic Value
             if num_agents > 0:
-                # Centralized Critic Value
-                # Aggregate agent observations to form a global state view (mean)
-                global_obs = torch.from_numpy(agent_obs).mean(dim=0, keepdim=True).to(device)
-                value = critic(global_obs)
-                all_values.append(value)
-
-                # Decentralized Actor Action
-                obs_tensor = torch.from_numpy(agent_obs).to(device)
-                with torch.no_grad():
-                    logits = actor(obs_tensor)
-
-                # Gumbel-Max for global action selection
-                gumbel_action_idx, agent_idx = select_action_gumbel_max(logits.cpu().numpy())
-                action = (agent_idx, gumbel_action_idx)
-
-                # Calculate log probability of the chosen action
-                dist = torch.distributions.Categorical(logits=logits)
-                log_prob = dist.log_prob(torch.tensor(gumbel_action_idx).to(device))[agent_idx]
-                all_logprobs.append(log_prob)
-
+                value = critic(torch.from_numpy(global_obs).unsqueeze(0).to(device))
             else:
-                # No agents, only deposition is possible
-                action = (0, 9)  # (agent_idx=0, action_idx=9 for deposition)
-                all_values.append(torch.tensor([0.0]).to(device))  # Placeholder value
-                all_logprobs.append(torch.tensor(0.0).to(device))  # Placeholder logprob
+                # If no agents, the value is estimated from a zero-vector observation
+                value = critic(torch.zeros(1, global_obs_dim).to(device))
+            all_values.append(value)
 
+            # Decentralized Actor Action Selection
+            with torch.no_grad():
+                if num_agents > 0:
+                    obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
+                    diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
+                    # Flatten diffusion logits and combine with the fixed deposition logit
+                    all_possible_logits = torch.cat(
+                        [diffusion_logits.flatten(), deposition_logit.unsqueeze(0)]
+                    )
+                else:
+                    # Only deposition is possible
+                    all_possible_logits = deposition_logit.unsqueeze(0)
+
+            # Gumbel-Max for global action selection across all possibilities
+            gumbel_action_idx, log_prob = select_action_gumbel_max(all_possible_logits)
+            all_logprobs.append(log_prob)
+
+
+            # Deconstruct the chosen action
+            if num_agents > 0 and gumbel_action_idx < num_agents * action_dim:
+                # It's a diffusion action
+                agent_idx = gumbel_action_idx // action_dim
+                action_idx = gumbel_action_idx % action_dim
+            else:
+                # It's a deposition action
+                agent_idx = -1 # Placeholder
+                action_idx = 9  # Deposition action
+
+            action = (agent_idx, action_idx)
             all_actions.append(action)
+
 
             # Execute action in the environment
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             all_rewards.append(reward)
-            next_done = done
+            agent_obs = next_obs["agent_observations"]
+            global_obs = next_obs["global_features"]
+            next_done = torch.tensor(1.0 if done else 0.0).to(device)
 
+        print("Rollout collection finished.")
         # --- GAE and Advantage Calculation ---
+        print("Calculating GAE and advantages...")
         with torch.no_grad():
             # Get value of the last state
-            next_agent_obs = next_obs["agents"]
-            if next_agent_obs.shape[0] > 0:
-                next_global_obs = (
-                    torch.from_numpy(next_agent_obs).mean(dim=0, keepdim=True).to(device)
-                )
-                next_value = critic(next_global_obs).reshape(1, -1)
+            if len(agent_obs) > 0:
+                next_value = critic(torch.from_numpy(global_obs).unsqueeze(0).to(device)).reshape(1, -1)
             else:
-                next_value = torch.zeros(1, 1).to(device)
+                next_value = critic(torch.zeros(1, global_obs_dim).to(device)).reshape(1, -1)
 
             advantages = torch.zeros(len(all_rewards)).to(device)
             last_gae_lam = 0
@@ -178,30 +208,47 @@ def main() -> None:
                     delta + CONFIG["gamma"] * CONFIG["gae_lambda"] * nextnonterminal * last_gae_lam
                 )
             returns = advantages + torch.cat(all_values).squeeze()
+        print("GAE calculation finished.")
 
         # --- PPO Update Phase ---
+        print("Starting PPO update phase...")
         # Flatten the batch
         b_logprobs = torch.stack(all_logprobs).to(device)
 
         # Optimizing the policy and value network
         for _epoch in range(CONFIG["update_epochs"]):
+            print(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
             # This is a simplified loop that processes one agent at a time.
             # A more advanced implementation would use minibatches, but that is
             # complex with variable numbers of agents.
             for i in range(len(all_obs)):
-                agent_obs = all_obs[i]["agents"]
-                if agent_obs.shape[0] > 0:
-                    # Recalculate log_probs, entropy, and values
-                    obs_tensor = torch.from_numpy(agent_obs).to(device)
-                    logits = actor(obs_tensor)
-                    dist = torch.distributions.Categorical(logits=logits)
+                if i > 0 and i % 256 == 0:
+                    print(f"    Processing batch item {i}/{len(all_obs)}...")
+                current_agent_obs = all_obs[i]["agent_observations"]
+                current_global_obs = all_obs[i]["global_features"]
+                num_agents = len(current_agent_obs)
 
-                    agent_idx, action_idx = all_actions[i]
-                    new_logprob = dist.log_prob(torch.tensor(action_idx).to(device))[agent_idx]
+
+                # Determine which action was taken
+                _agent_idx, action_idx = all_actions[i]
+                is_deposition = _agent_idx == -1
+
+                # We only update the policy for diffusion actions, as deposition is fixed
+                if not is_deposition and num_agents > 0:
+                    # Recalculate log_probs, entropy, and values
+                    obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
+                    diffusion_logits = actor(obs_tensor)
+                    all_possible_logits = torch.cat(
+                        [diffusion_logits.flatten(), deposition_logit.unsqueeze(0)]
+                    )
+                    dist = torch.distributions.Categorical(logits=all_possible_logits)
+
+                    # Find the index of the action taken in the flattened logit tensor
+                    gumbel_action_idx = _agent_idx * action_dim + action_idx
+                    new_logprob = dist.log_prob(torch.tensor(gumbel_action_idx).to(device))
                     entropy = dist.entropy().mean()
 
-                    global_obs = torch.from_numpy(agent_obs).mean(dim=0, keepdim=True).to(device)
-                    new_value = critic(global_obs)
+                    new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
 
                     # Policy loss
                     logratio = new_logprob - b_logprobs[i]
@@ -229,14 +276,22 @@ def main() -> None:
                     )
                     optimizer.step()
 
+        print("PPO update phase finished.")
+
         # Logging
         sps = int(global_step / (time.time() - start_time))
+        mean_reward = np.mean(all_rewards) if all_rewards else 0.0
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("charts/sps", sps, global_step)
-        writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("charts/mean_reward", np.mean(all_rewards), global_step)
+        if "v_loss" in locals():
+            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+        writer.add_scalar("charts/mean_reward", mean_reward, global_step)
+
+        print(
+            f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}"
+        )
 
         # Clear rollout storage
         all_obs, all_actions, all_logprobs, all_rewards, all_dones, all_values = (
@@ -246,10 +301,6 @@ def main() -> None:
             [],
             [],
             [],
-        )
-
-        print(
-            f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {np.mean(all_rewards):.4f}"
         )
 
     # Save final model

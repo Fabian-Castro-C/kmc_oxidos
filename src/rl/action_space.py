@@ -7,6 +7,7 @@ to ensure only valid actions are considered.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -18,6 +19,28 @@ if TYPE_CHECKING:
 
 # Total number of possible actions
 N_ACTIONS = 10
+
+
+class ActionType(Enum):
+    """Types of actions an agent can take."""
+
+    # Diffusion actions (for Ti/O particles)
+    DIFFUSE_X_POS = 0
+    DIFFUSE_X_NEG = 1
+    DIFFUSE_Y_POS = 2
+    DIFFUSE_Y_NEG = 3
+    DIFFUSE_Z_POS = 4
+    DIFFUSE_Z_NEG = 5
+
+    # Adsorption actions (for vacant sites)
+    ADSORB_TI = 6
+    ADSORB_O = 7
+
+    # Desorption action (for Ti/O particles)
+    DESORB = 8
+
+    # Reaction action (for Ti particles with O neighbors)
+    REACT_TIO2 = 9
 
 
 def get_action_mask(agent: ParticleAgent) -> npt.NDArray[np.bool_]:

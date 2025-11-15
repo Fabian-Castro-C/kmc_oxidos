@@ -24,10 +24,11 @@ from gymnasium import spaces
 from src.analysis.roughness import calculate_roughness
 from src.data.tio2_parameters import TiO2Parameters
 from src.kmc.lattice import Lattice, SpeciesType
-from src.rl.action_space import N_ACTIONS
-from src.rl.energy_calculator import SystemEnergyCalculator
+from src.rl.action_space import N_ACTIONS, ActionType
 from src.rl.particle_agent import create_agents_from_lattice
 from src.rl.rate_calculator import ActionRateCalculator
+
+from .energy_calculator import SystemEnergyCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -99,10 +100,21 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         if seed is not None:
             np.random.seed(seed)
 
-        # The observation space for a single agent. The environment will return a list of these.
+        # The observation space is a dictionary containing observations for all agents
+        # and global system features. Since the number of agents is dynamic,
+        # we define the agent observation space and will handle the list of
+        # observations in the custom training loop.
         self.single_agent_observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(58,), dtype=np.float32
         )
+        self.global_feature_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
+        )
+        self.observation_space = spaces.Dict({
+            "agent_observations": self.single_agent_observation_space, # Placeholder for shape
+            "global_features": self.global_feature_space,
+        })
+
         # The action space is now decoupled from a fixed max_agents value
         # It represents choosing one agent and one action for that agent.
         # The actual size will be set in reset() based on lattice size.
@@ -113,7 +125,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Initialize components (will be (re)created in reset())
         self.lattice: Lattice = Lattice(size=self.lattice_size)
         self.rate_calculator: ActionRateCalculator = ActionRateCalculator(
-            params=self.tio2_params,
             temperature=self.temperature,
             deposition_rate=self.deposition_rate,
         )
@@ -166,7 +177,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Initialize rate and energy calculators with current temperature
         self.rate_calculator = ActionRateCalculator(
-            params=self.tio2_params,
             temperature=self.temperature,
             deposition_rate=self.deposition_rate,
         )
@@ -284,8 +294,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         Returns:
             True if event executed successfully, False otherwise.
         """
-        from src.rl.action_space import ActionType
-
         site = agent.site
 
         # Adsorption Events
