@@ -1220,6 +1220,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "ase" },
+    { name = "cloudpickle" },
     { name = "gymnasium" },
     { name = "matplotlib" },
     { name = "numpy" },
@@ -1248,6 +1249,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ase", specifier = ">=3.26.0" },
+    { name = "cloudpickle", specifier = ">=3.1.1" },
     { name = "gymnasium", specifier = ">=1.2.1" },
     { name = "matplotlib", specifier = ">=3.10.7" },
     { name = "numpy", specifier = ">=2.3.4" },
