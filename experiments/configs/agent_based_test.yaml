@@ -4,16 +4,13 @@
 # Environment configuration
 environment:
   lattice_size: [5, 5, 5]      # Small lattice for testing
-  temperature: 600.0
+  temperature_range: [300.0, 900.0]  # Temperature range for generalization
   deposition_rate: 1.0
   max_steps: 50                 # Short episodes
   max_agents: 64                # Maximum agents (padded)
   use_reweighting: true         # Enable physical rate reweighting
-  reward_weights:
-    roughness_weight: -1.0
-    coverage_weight: 0.5
-    stoichiometry_weight: -0.3  # Ti:O ratio penalty
-    ess_weight: -0.1             # ESS penalty
+  # NOTE: reward_weights not used - using SwarmThinkers paper reward: r_t = -ΔE
+  # See src/training/energy_calculator.py for implementation
 
 # PPO hyperparameters (adjusted for agent-based)
 ppo:
@@ -29,7 +26,7 @@ ppo:
   max_grad_norm: 0.5
 
 # Training configuration
-total_timesteps: 50_000         # 50k steps for initial testing
+total_timesteps: 50_000         # Entrenamiento corto para prueba rápida
 n_envs: 4                       # Fewer parallel envs (agent-based is slower)
 
 # Checkpoint configuration
