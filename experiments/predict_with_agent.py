@@ -18,11 +18,13 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.analysis.fractal import calculate_fractal_dimension
 from src.data.tio2_parameters import TiO2Parameters
 from src.kmc.lattice import SpeciesType
 from src.rl.action_selection import select_action_gumbel_max
@@ -34,50 +36,26 @@ from src.settings import settings
 # Setup logging
 logger = settings.setup_logging()
 
-
-class PredictionConfig:
-    """Configuration for prediction run."""
-
-    def __init__(
-        self,
-        model_path: str,
-        lattice_size=(30, 30, 20),
-        temperature=600.0,
-        deposition_flux_ti=0.1,
-        deposition_flux_o=0.2,
-        max_steps=500,
-        seed=42,
-        n_snapshots=20,
-    ):
-        self.model_path = Path(model_path)
-        self.lattice_size = lattice_size
-        self.temperature = temperature
-        self.deposition_flux_ti = deposition_flux_ti
-        self.deposition_flux_o = deposition_flux_o
-        self.max_steps = max_steps
-        self.seed = seed
-        self.n_snapshots = n_snapshots
-
-    def to_dict(self):
-        return {
-            "model_path": str(self.model_path),
-            "lattice_size": list(self.lattice_size),
-            "temperature": self.temperature,
-            "deposition_flux_ti": self.deposition_flux_ti,
-            "deposition_flux_o": self.deposition_flux_o,
-            "max_steps": self.max_steps,
-            "seed": self.seed,
-            "n_snapshots": self.n_snapshots,
-        }
+# --- Configuration ---
+# NOTE: Deposition fluxes MUST match training configuration for consistency
+CONFIG = {
+    "torch_seed": 42,
+    "lattice_size": (30, 30, 20),  # Can differ from training size
+    "deposition_flux_ti": 0.1,  # MUST match training: Ti monolayers per second
+    "deposition_flux_o": 0.2,   # MUST match training: O monolayers per second
+    "temperature": 600.0,  # Temperature in Kelvin (should match training)
+    "max_steps": 500,
+    "n_snapshots": 20,
+}
 
 
 class PredictionResults:
     """Container for prediction results and visualization."""
 
-    def __init__(self, config: PredictionConfig):
-        self.config = config
+    def __init__(self, model_path: str):
+        self.model_path = Path(model_path)
         self.timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self.output_dir = Path(__file__).parent / "results" / "predictions" / self.timestamp
+        self.output_dir = Path(__file__).parent / "results" / "predict" / self.timestamp
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         # Time series data
@@ -88,6 +66,11 @@ class PredictionResults:
         self.n_ti_list = []
         self.n_o_list = []
         self.n_agents_list = []
+        
+        # Scaling analysis data
+        self.fractal_dims = []
+        self.alpha_list = []
+        self.beta_list = []
 
         # Action statistics
         self.action_counts = {
@@ -109,7 +92,8 @@ class PredictionResults:
     def record_step(self, step: int, env: AgentBasedTiO2Env, reward: float, action_str: str):
         """Record metrics for current step."""
         self.steps.append(step)
-        self.roughnesses.append(env._calculate_roughness())
+        roughness = env._calculate_roughness()
+        self.roughnesses.append(roughness)
         self.coverages.append(env._calculate_coverage())
         self.rewards.append(reward)
         self.n_ti_list.append(env._count_species(SpeciesType.TI))
@@ -120,17 +104,56 @@ class PredictionResults:
         if action_str in self.action_counts:
             self.action_counts[action_str] += 1
 
+        # Calculate fractal dimension at this step
+        try:
+            height_profile = env.lattice.get_height_profile()
+            fractal_dim = float(calculate_fractal_dimension(height_profile))
+            self.fractal_dims.append(fractal_dim)
+        except Exception:
+            self.fractal_dims.append(None)
+
+        # Calculate scaling exponents if we have enough data
+        if len(self.steps) >= 5 and len(self.roughnesses) >= 5:
+            try:
+                from src.analysis import fit_family_vicsek
+                steps_array = np.array(self.steps, dtype=float)
+                roughnesses_array = np.array(self.roughnesses)
+                system_size = float(np.sqrt(CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]))
+                scaling = fit_family_vicsek(steps_array, roughnesses_array, system_size)
+                self.alpha_list.append(float(scaling["alpha"]))
+                self.beta_list.append(float(scaling["beta"]))
+            except Exception:
+                self.alpha_list.append(None)
+                self.beta_list.append(None)
+        else:
+            self.alpha_list.append(None)
+            self.beta_list.append(None)
+
         # Store snapshots at regular intervals
-        if len(self.height_profiles) < self.config.n_snapshots:
-            interval = max(1, self.config.max_steps // self.config.n_snapshots)
-            if step % interval == 0 or step == self.config.max_steps - 1:
+        if len(self.height_profiles) < CONFIG["n_snapshots"]:
+            interval = max(1, CONFIG["max_steps"] // CONFIG["n_snapshots"])
+            if step % interval == 0 or step == CONFIG["max_steps"] - 1:
                 self.height_profiles.append(env.lattice.get_height_profile())
                 self.snapshot_steps.append(step)
 
     def save_results(self):
-        """Save results to JSON."""
+        """Save results to JSON and CSV formats."""
+        # Get final values
+        final_alpha = self.alpha_list[-1] if self.alpha_list and self.alpha_list[-1] is not None else None
+        final_beta = self.beta_list[-1] if self.beta_list and self.beta_list[-1] is not None else None
+        final_fractal = self.fractal_dims[-1] if self.fractal_dims and self.fractal_dims[-1] is not None else None
+
         results = {
-            "config": self.config.to_dict(),
+            "config": {
+                "model_path": str(self.model_path),
+                "lattice_size": list(CONFIG["lattice_size"]),
+                "temperature": CONFIG["temperature"],
+                "deposition_flux_ti": CONFIG["deposition_flux_ti"],
+                "deposition_flux_o": CONFIG["deposition_flux_o"],
+                "max_steps": CONFIG["max_steps"],
+                "seed": CONFIG["torch_seed"],
+                "n_snapshots": CONFIG["n_snapshots"],
+            },
             "metrics": {
                 "steps": self.steps,
                 "roughnesses": self.roughnesses,
@@ -139,6 +162,9 @@ class PredictionResults:
                 "n_ti": self.n_ti_list,
                 "n_o": self.n_o_list,
                 "n_agents": self.n_agents_list,
+                "fractal_dimensions": self.fractal_dims,
+                "alpha": self.alpha_list,
+                "beta": self.beta_list,
             },
             "action_counts": self.action_counts,
             "final_metrics": {
@@ -148,27 +174,49 @@ class PredictionResults:
                 "mean_reward": np.mean(self.rewards) if self.rewards else 0.0,
                 "final_n_ti": self.n_ti_list[-1] if self.n_ti_list else 0,
                 "final_n_o": self.n_o_list[-1] if self.n_o_list else 0,
+                "final_fractal_dimension": final_fractal,
+                "final_alpha": final_alpha,
+                "final_beta": final_beta,
             },
         }
 
+        # Save JSON
         with open(self.output_dir / "results.json", "w") as f:
             json.dump(results, f, indent=2)
 
+        # Save CSV for easy import into Origin/MATLAB/Excel
+        df = pd.DataFrame({
+            "step": self.steps,
+            "roughness": self.roughnesses,
+            "coverage": self.coverages,
+            "reward": self.rewards,
+            "n_ti": self.n_ti_list,
+            "n_o": self.n_o_list,
+            "n_agents": self.n_agents_list,
+            "fractal_dimension": self.fractal_dims,
+            "alpha": self.alpha_list,
+            "beta": self.beta_list,
+        })
+        df.to_csv(self.output_dir / "timeseries.csv", index=False)
+
         logger.info(f"Results saved to {self.output_dir / 'results.json'}")
+        logger.info(f"Time series data saved to {self.output_dir / 'timeseries.csv'}")
 
     def generate_plots(self, env: AgentBasedTiO2Env):
-        """Generate all visualization plots."""
+        """Generate all visualization plots in multiple formats."""
         logger.info("Generating plots...")
 
         # Plot 1: Roughness evolution
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(self.steps, self.roughnesses, "b-", linewidth=2)
         ax.set_xlabel("Step", fontsize=12)
-        ax.set_ylabel("Roughness (nm)", fontsize=12)
+        ax.set_ylabel("Roughness (Å)", fontsize=12)
         ax.set_title("Surface Roughness Evolution", fontsize=14, fontweight="bold")
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(self.output_dir / "plot_01_roughness.png", dpi=150)
+        # Save in multiple formats
+        for fmt in ["png", "svg", "pdf"]:
+            plt.savefig(self.output_dir / f"plot_01_roughness.{fmt}", dpi=150 if fmt == "png" else None)
         plt.close()
 
         # Plot 2: Coverage and composition
@@ -191,7 +239,8 @@ class PredictionResults:
         ax2.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(self.output_dir / "plot_02_coverage_composition.png", dpi=150)
+        for fmt in ["png", "svg", "pdf"]:
+            plt.savefig(self.output_dir / f"plot_02_coverage_composition.{fmt}", dpi=150 if fmt == "png" else None)
         plt.close()
 
         # Plot 3: Rewards
@@ -215,7 +264,8 @@ class PredictionResults:
         ax.axhline(y=0, color="k", linestyle="--", alpha=0.3)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(self.output_dir / "plot_03_rewards.png", dpi=150)
+        for fmt in ["png", "svg", "pdf"]:
+            plt.savefig(self.output_dir / f"plot_03_rewards.{fmt}", dpi=150 if fmt == "png" else None)
         plt.close()
 
         # Plot 4: Action distribution
@@ -239,7 +289,8 @@ class PredictionResults:
         ax.set_title("Action Distribution", fontsize=14, fontweight="bold")
         plt.xticks(rotation=45, ha="right")
         plt.tight_layout()
-        plt.savefig(self.output_dir / "plot_04_action_distribution.png", dpi=150)
+        for fmt in ["png", "svg", "pdf"]:
+            plt.savefig(self.output_dir / f"plot_04_action_distribution.{fmt}", dpi=150 if fmt == "png" else None)
         plt.close()
 
         # Plot 5: Final height profile
@@ -251,43 +302,182 @@ class PredictionResults:
         ax.set_title("Final Height Profile", fontsize=14, fontweight="bold")
         plt.colorbar(im, ax=ax, label="Height (layers)")
         plt.tight_layout()
-        plt.savefig(self.output_dir / "plot_05_height_profile.png", dpi=150)
+        for fmt in ["png", "svg", "pdf"]:
+            plt.savefig(self.output_dir / f"plot_05_height_profile.{fmt}", dpi=150 if fmt == "png" else None)
         plt.close()
+
+        # Plot 6: Scaling analysis (log-log)
+        if len(self.steps) > 10:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.loglog(self.steps, self.roughnesses, "bo-", linewidth=2, markersize=4, label="Data")
+            ax.set_xlabel("Step", fontsize=12)
+            ax.set_ylabel("Roughness (Å)", fontsize=12)
+            ax.set_title("Dynamic Scaling Analysis (Log-Log)", fontsize=14, fontweight="bold")
+            ax.grid(True, alpha=0.3, which="both")
+            ax.legend()
+            plt.tight_layout()
+            for fmt in ["png", "svg", "pdf"]:
+                plt.savefig(self.output_dir / f"plot_06_scaling_loglog.{fmt}", dpi=150 if fmt == "png" else None)
+            plt.close()
+
+        # Plot 7: Scaling exponents evolution (α, β)
+        if len(self.alpha_list) > 0:
+            valid_indices = [i for i, a in enumerate(self.alpha_list) if a is not None]
+            if valid_indices:
+                valid_steps = [self.steps[i] for i in valid_indices]
+                valid_alpha = [self.alpha_list[i] for i in valid_indices]
+                valid_beta = [self.beta_list[i] for i in valid_indices]
+
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+
+                # Alpha evolution
+                ax1.plot(valid_steps, valid_alpha, "ro-", linewidth=2, markersize=4, label=r"$\alpha$ (roughness)")
+                ax1.axhline(y=0.5, color='k', linestyle='--', alpha=0.3, label=r"$\alpha=0.5$ (EW)")
+                ax1.axhline(y=0.38, color='b', linestyle='--', alpha=0.3, label=r"$\alpha=0.38$ (KPZ)")
+                ax1.set_xlabel("Step", fontsize=12)
+                ax1.set_ylabel(r"$\alpha$", fontsize=14)
+                ax1.set_title(r"Roughness Exponent ($\alpha$) Evolution", fontsize=14, fontweight="bold")
+                ax1.grid(True, alpha=0.3)
+                ax1.legend()
+
+                # Beta evolution
+                ax2.plot(valid_steps, valid_beta, "bs-", linewidth=2, markersize=4, label=r"$\beta$ (growth)")
+                ax2.axhline(y=0.25, color='k', linestyle='--', alpha=0.3, label=r"$\beta=0.25$ (EW)")
+                ax2.axhline(y=0.33, color='r', linestyle='--', alpha=0.3, label=r"$\beta=0.33$ (KPZ)")
+                ax2.set_xlabel("Step", fontsize=12)
+                ax2.set_ylabel(r"$\beta$", fontsize=14)
+                ax2.set_title(r"Growth Exponent ($\beta$) Evolution", fontsize=14, fontweight="bold")
+                ax2.grid(True, alpha=0.3)
+                ax2.legend()
+
+                plt.tight_layout()
+                for fmt in ["png", "svg", "pdf"]:
+                    plt.savefig(self.output_dir / f"plot_07_scaling_exponents.{fmt}", dpi=150 if fmt == "png" else None)
+                plt.close()
+
+        # Plot 8: Fractal dimension evolution
+        if len(self.fractal_dims) > 0:
+            valid_indices = [i for i, f in enumerate(self.fractal_dims) if f is not None]
+            if valid_indices:
+                valid_steps = [self.steps[i] for i in valid_indices]
+                valid_fractal = [self.fractal_dims[i] for i in valid_indices]
+
+                fig, ax = plt.subplots(figsize=(10, 6))
+                ax.plot(valid_steps, valid_fractal, "go-", linewidth=2, markersize=4)
+                ax.axhline(y=2.0, color='k', linestyle='--', alpha=0.3, label="D=2.0 (flat)")
+                ax.axhline(y=2.5, color='b', linestyle='--', alpha=0.3, label="D=2.5 (typical rough)")
+                ax.set_xlabel("Step", fontsize=12)
+                ax.set_ylabel("Fractal Dimension", fontsize=12)
+                ax.set_title("Fractal Dimension Evolution", fontsize=14, fontweight="bold")
+                ax.grid(True, alpha=0.3)
+                ax.legend()
+                plt.tight_layout()
+                for fmt in ["png", "svg", "pdf"]:
+                    plt.savefig(self.output_dir / f"plot_08_fractal_dimension.{fmt}", dpi=150 if fmt == "png" else None)
+                plt.close()
 
         # Generate snapshot frames
         self._generate_snapshot_frames()
 
-        logger.info(f"All plots saved to {self.output_dir}")
+        logger.info(f"All plots saved to {self.output_dir} (PNG, SVG, PDF)")
+
+    def _export_to_gsf(self, height_profile, output_path, lattice_constant, step, roughness, coverage):
+        """
+        Export height profile to GSF (GXSM Simple Field) format for Gwyddion.
+        """
+        ny, nx = height_profile.shape
+
+        # Physical dimensions in nanometers
+        xreal = nx * lattice_constant / 10.0  # Convert Angstrom to nm
+        yreal = ny * lattice_constant / 10.0
+
+        # Convert height from layers to physical units (Angstrom)
+        height_angstrom = height_profile * lattice_constant
+
+        # Write GSF file
+        with open(output_path, 'wb') as f:
+            # Write ASCII header
+            header = f"""Gwyddion Simple Field 1.0
+XRes = {nx}
+YRes = {ny}
+XReal = {xreal:.6e}
+YReal = {yreal:.6e}
+XOffset = 0.000000e+00
+YOffset = 0.000000e+00
+Title = RL Agent TiO2 Growth - Step {step}
+XYUnits = nm
+ZUnits = Angstrom
+# Simulation metadata
+# Step: {step}
+# Roughness: {roughness:.6f} Angstrom
+# Coverage: {coverage:.6f} ML
+# Temperature: {CONFIG['temperature']} K
+# Lattice constant: {lattice_constant} Angstrom
+"""
+            header_bytes = header.encode('ascii')
+            f.write(header_bytes)
+
+            # Padding to 4-byte alignment
+            header_length = len(header_bytes)
+            padding_length = 4 - (header_length % 4)
+            f.write(b'\x00' * padding_length)
+
+            # Write binary data (4-byte floats, little-endian)
+            height_flat = height_angstrom.astype('<f4').tobytes()
+            f.write(height_flat)
 
     def _generate_snapshot_frames(self):
-        """Generate individual frames for each snapshot."""
+        """Generate individual frames for movie creation."""
         logger.info(f"Generating {len(self.height_profiles)} snapshot frames...")
 
         snapshots_dir = self.output_dir / "snapshots"
         snapshots_dir.mkdir(exist_ok=True)
 
+        # Create gwyddion directory for GSF files
+        gwyddion_dir = self.output_dir / "gwyddion"
+        gwyddion_dir.mkdir(exist_ok=True)
+
+        # Lattice constant for TiO2 rutile
+        lattice_constant = 4.59  # Angstroms
+
         # Find global min/max for consistent colorbar
         all_heights = np.concatenate([h.flatten() for h in self.height_profiles])
         vmin, vmax = float(all_heights.min()), float(all_heights.max())
 
-        for _i, (height_profile, step) in enumerate(zip(self.height_profiles, self.snapshot_steps)):
-            fig, ax = plt.subplots(figsize=(8, 7))
-            im = ax.imshow(
-                height_profile, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax
+        for i, height_profile in enumerate(self.height_profiles):
+            step = self.snapshot_steps[i]
+            # Find the index in the full data arrays corresponding to this step
+            step_idx = self.steps.index(step) if step in self.steps else i
+            roughness = self.roughnesses[step_idx] if step_idx < len(self.roughnesses) else 0.0
+            coverage = self.coverages[step_idx] if step_idx < len(self.coverages) else 0.0
+
+            # Export to GSF format for Gwyddion
+            self._export_to_gsf(
+                height_profile,
+                gwyddion_dir / f"snapshot_{step:06d}.gsf",
+                lattice_constant,
+                step,
+                roughness,
+                coverage
             )
-            ax.set_xlabel("X", fontsize=12)
-            ax.set_ylabel("Y", fontsize=12)
+
+            # Create PNG snapshot
+            fig, ax = plt.subplots(figsize=(8, 7))
+            im = ax.imshow(height_profile, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
+            ax.set_xlabel("X", fontsize=11)
+            ax.set_ylabel("Y", fontsize=11)
             ax.set_title(
-                f"Step {step} | Roughness: {self.roughnesses[step]:.3f} nm",
-                fontsize=14,
+                f"Step {step}: R={roughness:.2f}Å, θ={coverage:.3f}",
+                fontsize=12,
                 fontweight="bold",
             )
             plt.colorbar(im, ax=ax, label="Height (layers)")
             plt.tight_layout()
-            plt.savefig(snapshots_dir / f"snapshot_{step:06d}.png", dpi=150)
+            plt.savefig(snapshots_dir / f"snapshot_{step:06d}.png", dpi=120)
             plt.close()
 
         logger.info(f"Snapshots saved to {snapshots_dir}")
+        logger.info(f"GSF files (Gwyddion) saved to {gwyddion_dir}")
 
 
 def load_model(model_path: Path, obs_dim: int, action_dim: int, global_obs_dim: int, device):
@@ -308,107 +498,113 @@ def load_model(model_path: Path, obs_dim: int, action_dim: int, global_obs_dim: 
     return actor, critic
 
 
-def run_prediction(config: PredictionConfig):
+def run_prediction(model_path: str):
     """Run prediction with trained agent."""
     logger.info("=" * 80)
     logger.info("Starting RL Agent Prediction")
     logger.info("=" * 80)
-    logger.info(f"Model: {config.model_path}")
-    logger.info(f"Lattice size: {config.lattice_size}")
-    logger.info(f"Temperature: {config.temperature} K")
-    logger.info(f"Max steps: {config.max_steps}")
+    logger.info(f"Model: {model_path}")
+    logger.info(f"Lattice size: {CONFIG['lattice_size']}")
+    logger.info(f"Temperature: {CONFIG['temperature']} K")
+    logger.info(f"Deposition Flux (Ti): {CONFIG['deposition_flux_ti']} ML/s")
+    logger.info(f"Deposition Flux (O): {CONFIG['deposition_flux_o']} ML/s")
+    logger.info(f"Max steps: {CONFIG['max_steps']}")
     logger.info("=" * 80)
 
     # Setup
-    torch.manual_seed(config.seed)
-    np.random.seed(config.seed)
+    torch.manual_seed(CONFIG["torch_seed"])
+    np.random.seed(CONFIG["torch_seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Create environment
     params = TiO2Parameters()
     env = AgentBasedTiO2Env(
-        lattice_size=config.lattice_size,
+        lattice_size=CONFIG["lattice_size"],
         tio2_parameters=params,
-        temperature=config.temperature,
-        max_steps=config.max_steps,
-        seed=config.seed,
+        temperature=CONFIG["temperature"],
+        max_steps=CONFIG["max_steps"],
+        seed=CONFIG["torch_seed"],
     )
 
-    # Calculate deposition logits
-    n_sites = config.lattice_size[0] * config.lattice_size[1]
-    deposition_logit_ti = torch.tensor(np.log(config.deposition_flux_ti * n_sites)).to(device)
-    deposition_logit_o = torch.tensor(np.log(config.deposition_flux_o * n_sites)).to(device)
+    # Calculate deposition logits (same formula as training)
+    n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
+    deposition_logit_ti = torch.tensor(np.log(CONFIG["deposition_flux_ti"] * n_sites)).to(device)
+    deposition_logit_o = torch.tensor(np.log(CONFIG["deposition_flux_o"] * n_sites)).to(device)
+
+    logger.info(f"Calculated Deposition Logit (Ti): {deposition_logit_ti.item():.4f}")
+    logger.info(f"Calculated Deposition Logit (O): {deposition_logit_o.item():.4f}")
 
     # Load model
     obs_dim = env.single_agent_observation_space.shape[0]
     global_obs_dim = env.global_feature_space.shape[0]
     action_dim = N_ACTIONS
 
-    actor, critic = load_model(config.model_path, obs_dim, action_dim, global_obs_dim, device)
+    actor, critic = load_model(model_path, obs_dim, action_dim, global_obs_dim, device)
 
     # Results container
-    results = PredictionResults(config)
+    results = PredictionResults(model_path)
 
     # Run simulation
     logger.info("Running simulation...")
-    obs, info = env.reset(seed=config.seed)
+    obs, info = env.reset(seed=CONFIG["torch_seed"])
     start_time = time.time()
 
-    for step in range(config.max_steps):
+    for step in range(CONFIG["max_steps"]):
         if step % 50 == 0:
-            logger.info(f"  Step {step}/{config.max_steps}...")
+            logger.info(f"  Step {step}/{CONFIG['max_steps']}...")
 
         # Get observations
         agent_obs = obs["agent_observations"]
         global_obs = obs["global_features"]
+        num_agents = len(agent_obs)
 
-        if len(agent_obs) == 0:
-            logger.warning(f"No agents at step {step}, ending simulation")
-            break
-
-        # Get action mask
-        action_mask = env.get_action_mask()
-
-        # Convert to tensors
-        agent_obs_tensor = torch.tensor(np.array(agent_obs), dtype=torch.float32).to(device)
-        _global_obs_tensor = torch.tensor(global_obs, dtype=torch.float32).unsqueeze(0).to(device)
-
-        # Get logits from actor
+        # Decentralized Actor Action Selection (same logic as training)
         with torch.no_grad():
-            agent_logits = actor(agent_obs_tensor)
+            if num_agents > 0:
+                obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
+                diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
 
-        # Combine with deposition logits
-        all_logits = torch.cat(
-            [
-                agent_logits.flatten(),
-                deposition_logit_ti.unsqueeze(0),
-                deposition_logit_o.unsqueeze(0),
-            ]
-        )
+                # Get and apply the action mask
+                action_mask = env.get_action_mask()
+                action_mask_tensor = torch.from_numpy(action_mask).to(device)
+                diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
 
-        # Create combined mask
-        agent_mask_flat = torch.tensor(action_mask.flatten(), dtype=torch.bool).to(device)
-        deposition_mask = torch.tensor([True, True], dtype=torch.bool).to(device)
-        combined_mask = torch.cat([agent_mask_flat, deposition_mask])
+                # Flatten diffusion logits and combine with the fixed deposition logits
+                all_possible_logits = torch.cat(
+                    [
+                        diffusion_logits.flatten(),
+                        deposition_logit_ti.unsqueeze(0),
+                        deposition_logit_o.unsqueeze(0),
+                    ]
+                )
+            else:
+                # No agents, so no diffusion actions to mask
+                # Only deposition is possible
+                all_possible_logits = torch.cat(
+                    [deposition_logit_ti.unsqueeze(0), deposition_logit_o.unsqueeze(0)]
+                )
 
-        # Select action using Gumbel-Max
-        selected_idx = select_action_gumbel_max(all_logits, combined_mask)
+        # Gumbel-Max for global action selection across all possibilities
+        gumbel_action_idx, _log_prob = select_action_gumbel_max(all_possible_logits)
 
-        # Determine action type
-        n_agent_actions = len(agent_obs) * N_ACTIONS
-        if selected_idx < n_agent_actions:
-            agent_idx = selected_idx // N_ACTIONS
-            action_idx = selected_idx % N_ACTIONS
+        # Deconstruct the chosen action
+        diffusion_action_space_size = num_agents * action_dim
+        if gumbel_action_idx < diffusion_action_space_size:
+            # It's a diffusion action
+            agent_idx = gumbel_action_idx // action_dim
+            action_idx = gumbel_action_idx % action_dim
             action = (agent_idx, action_idx)
             action_str = (
                 f"DIFFUSE_{['X_POS', 'X_NEG', 'Y_POS', 'Y_NEG', 'Z_POS', 'Z_NEG'][action_idx]}"
                 if action_idx < 6
                 else "DESORB"
             )
-        elif selected_idx == n_agent_actions:
+        elif gumbel_action_idx == diffusion_action_space_size:
+            # It's a Ti deposition action
             action = "DEPOSIT_TI"
             action_str = "DEPOSIT_TI"
         else:
+            # It's an O deposition action
             action = "DEPOSIT_O"
             action_str = "DEPOSIT_O"
 
@@ -450,29 +646,32 @@ def main():
         "--lattice-size",
         type=int,
         nargs=3,
-        default=[30, 30, 20],
-        help="Lattice dimensions (nx ny nz)",
+        default=None,
+        help="Lattice dimensions (nx ny nz). Default from CONFIG.",
     )
     parser.add_argument(
-        "--temperature", type=float, default=600.0, help="Temperature in Kelvin (default: 600K)"
+        "--temperature", type=float, default=None, help="Temperature in Kelvin. Default from CONFIG."
     )
-    parser.add_argument("--steps", type=int, default=500, help="Number of simulation steps")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--snapshots", type=int, default=20, help="Number of snapshots to save")
+    parser.add_argument("--steps", type=int, default=None, help="Number of simulation steps. Default from CONFIG.")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed. Default from CONFIG.")
+    parser.add_argument("--snapshots", type=int, default=None, help="Number of snapshots to save. Default from CONFIG.")
 
     args = parser.parse_args()
 
-    config = PredictionConfig(
-        model_path=args.model,
-        lattice_size=tuple(args.lattice_size),
-        temperature=args.temperature,
-        max_steps=args.steps,
-        seed=args.seed,
-        n_snapshots=args.snapshots,
-    )
+    # Override CONFIG with command-line arguments if provided
+    if args.lattice_size is not None:
+        CONFIG["lattice_size"] = tuple(args.lattice_size)
+    if args.temperature is not None:
+        CONFIG["temperature"] = args.temperature
+    if args.steps is not None:
+        CONFIG["max_steps"] = args.steps
+    if args.seed is not None:
+        CONFIG["torch_seed"] = args.seed
+    if args.snapshots is not None:
+        CONFIG["n_snapshots"] = args.snapshots
 
     try:
-        run_prediction(config)
+        run_prediction(args.model)
     except Exception as e:
         logger.error(f"Prediction failed: {e}", exc_info=True)
         sys.exit(1)

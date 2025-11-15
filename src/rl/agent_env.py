@@ -453,7 +453,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         if self.lattice is None:
             return 0.0
         try:
-            roughness = calculate_roughness(self.lattice)
+            height_profile = self.lattice.get_height_profile()
+            roughness = calculate_roughness(height_profile)
             return float(roughness)
         except Exception:
             return 0.0

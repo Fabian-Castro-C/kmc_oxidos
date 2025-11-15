@@ -49,7 +49,7 @@ CONFIG = {
     "adam_eps": 1e-5,
     "target_kl": None,
     "update_epochs": 10,
-    "results_path": Path("experiments/results"),
+    "results_path": Path("experiments/results/train"),
 }
 
 
