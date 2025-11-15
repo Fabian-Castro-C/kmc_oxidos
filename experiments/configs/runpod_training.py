@@ -27,7 +27,7 @@ ENV_CONFIG = {
     # Thin film geometry: large substrate (x,y), sufficient height (z) for growth
     # A100-40GB: (60, 60, 120) → 432,000 sites
     # A100-80GB: (80, 80, 150) → 960,000 sites (recommended)
-    "lattice_size": (30, 30, 50),  # Large substrate + enough Z for growth
+    "lattice_size": (10, 10, 20),  # Large substrate + enough Z for growth
     # Physical parameters (MUST match between training and inference)
     "temperature": 600.0,  # Kelvin - PVD typical temperature
     "deposition_flux_ti": 0.1,  # ML/s - Titanium flux
