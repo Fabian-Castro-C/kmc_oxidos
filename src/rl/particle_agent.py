@@ -144,29 +144,33 @@ class ParticleAgent:
 
     def _get_1st_neighbors(self) -> npt.NDArray[np.int8]:
         """
-        Get species of 1st nearest neighbors.
+        Get species of 1st nearest neighbors. Vectorized with numpy.
 
         Uses the neighbor list from the Site object.
 
         Returns:
             Array of species IDs (padded to 6 for consistency).
         """
-        neighbor_species = []
+        # Pre-allocate result array with padding (VACANT = 0)
+        result = np.zeros(6, dtype=np.int8)
 
-        # Get neighbors from site's neighbor list
-        for neighbor_idx in self.site.neighbors:
-            neighbor_site = self.lattice.sites[neighbor_idx]
-            neighbor_species.append(neighbor_site.species.value)
+        # Get neighbor indices as array
+        neighbor_indices = np.array(self.site.neighbors, dtype=np.int32)
+        n_neighbors = len(neighbor_indices)
 
-        # Pad to 6 (some sites may have fewer neighbors at boundaries)
-        while len(neighbor_species) < 6:
-            neighbor_species.append(0)  # Pad with VACANT
+        if n_neighbors > 0:
+            # Vectorized species lookup
+            neighbor_species = np.array(
+                [self.lattice.sites[idx].species.value for idx in neighbor_indices[:6]],
+                dtype=np.int8
+            )
+            result[:len(neighbor_species)] = neighbor_species
 
-        return np.array(neighbor_species[:6], dtype=np.int8)
+        return result
 
     def _get_2nd_neighbors(self) -> npt.NDArray[np.int8]:
         """
-        Get species of 2nd nearest neighbors.
+        Get species of 2nd nearest neighbors. Vectorized with numpy.
 
         For simplicity, use a geometric approach with position offsets.
 
@@ -176,45 +180,43 @@ class ParticleAgent:
         x, y, z = self.position
         nx, ny, nz = self.lattice.size
 
-        # 2nd neighbors: edge-sharing (12 directions)
-        offsets = [
+        # 2nd neighbors: edge-sharing (12 directions) - pre-computed as numpy array
+        offsets = np.array([
             # Along x-y plane
-            (1, 1, 0),
-            (1, -1, 0),
-            (-1, 1, 0),
-            (-1, -1, 0),
+            [1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0],
             # Along x-z plane
-            (1, 0, 1),
-            (1, 0, -1),
-            (-1, 0, 1),
-            (-1, 0, -1),
+            [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1],
             # Along y-z plane
-            (0, 1, 1),
-            (0, 1, -1),
-            (0, -1, 1),
-            (0, -1, -1),
-        ]
+            [0, 1, 1], [0, 1, -1], [0, -1, 1], [0, -1, -1],
+        ], dtype=np.int16)
 
-        species_list = []
-        for dx, dy, dz in offsets:
-            nx_pos = (x + dx) % nx
-            ny_pos = (y + dy) % ny
-            nz_pos = z + dz
+        # Vectorized position calculation
+        pos = np.array([x, y, z], dtype=np.int16)
+        neighbor_positions = pos + offsets
 
-            # Handle z boundaries (no periodic in z)
-            if 0 <= nz_pos < nz:
-                # Find site index from position
-                neighbor_idx = nx_pos + ny_pos * nx + nz_pos * nx * ny
-                if 0 <= neighbor_idx < len(self.lattice.sites):
-                    neighbor_site = self.lattice.sites[neighbor_idx]
-                    species_list.append(neighbor_site.species.value)
-                else:
-                    species_list.append(0)
-            else:
-                # Out of bounds in z → treat as VACANT
-                species_list.append(0)
+        # Apply periodic boundary conditions for x and y
+        neighbor_positions[:, 0] = neighbor_positions[:, 0] % nx
+        neighbor_positions[:, 1] = neighbor_positions[:, 1] % ny
 
-        return np.array(species_list, dtype=np.int8)
+        # Check z boundaries (no PBC in z)
+        valid_z = (neighbor_positions[:, 2] >= 0) & (neighbor_positions[:, 2] < nz)
+
+        # Calculate indices
+        species_list = np.zeros(12, dtype=np.int8)
+        valid_positions = neighbor_positions[valid_z]
+
+        if len(valid_positions) > 0:
+            indices = (
+                valid_positions[:, 0] +
+                valid_positions[:, 1] * nx +
+                valid_positions[:, 2] * nx * ny
+            )
+            # Vectorized species lookup for valid positions
+            for i, idx in enumerate(indices):
+                if 0 <= idx < len(self.lattice.sites):
+                    species_list[np.where(valid_z)[0][i]] = self.lattice.sites[idx].species.value
+
+        return species_list
 
     def get_valid_actions(self) -> list[ActionType]:
         """

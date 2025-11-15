@@ -19,6 +19,7 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
+import numpy.typing as npt
 from gymnasium import spaces
 
 from src.analysis.roughness import calculate_roughness
@@ -144,6 +145,26 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self.prev_omega: float = 0.0  # Track grand potential for reward calculation
         self.step_info: list[dict[str, Any]] = []  # Store info for logging
 
+        # Cached metrics (updated only at episode end)
+        self._cached_roughness: float | None = None
+        self._cached_coverage: float | None = None
+
+        # Cached species counts (updated incrementally)
+        self._species_counts = {SpeciesType.TI: 0, SpeciesType.O: 0, SpeciesType.VACANT: 0}
+
+        # Track valid deposition sites for O(1) access
+        self._valid_deposition_sites: list[int] = []
+
+        # Anti-loop mechanism: track recent states
+        self._recent_actions: list[tuple] = []  # Last N actions
+        self._action_history_size = 10  # Track last 10 actions
+        self._loop_penalty = 1.0  # Penalty for detected loops
+        self._step_penalty = 0.005  # Small penalty per step to encourage efficiency
+
+        # Observation caching: cache agent observations to avoid recomputation
+        self._observation_cache: dict[int, npt.NDArray[np.float32]] = {}  # site_idx -> observation vector
+        self._dirty_observations: set[int] = set()  # Set of site_idx that need recomputation
+
     def reset(
         self,
         seed: int | None = None,
@@ -208,6 +229,23 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Calculate initial grand potential for reward computation
         self.prev_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
 
+        # Initialize cached species counts
+        self._update_species_counts_full()
+
+        # Initialize valid deposition sites
+        self._update_deposition_sites()
+
+        # Clear cached metrics (will be computed at episode end)
+        self._cached_roughness = None
+        self._cached_coverage = None
+
+        # Clear action history for loop detection
+        self._recent_actions = []
+
+        # Clear observation cache
+        self._observation_cache.clear()
+        self._dirty_observations.clear()
+
         observation = self._get_observation()
         info = {"step": 0, "n_agents": len(self.agents)}
 
@@ -253,8 +291,25 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             _action_enum = ActionType(action_idx)
             success, reason = self._execute_agent_action(agent_idx, action_idx)
 
+        # Track action for loop detection
+        if is_deposition_action:
+            action_signature = ("DEPOSIT", action)
+        else:
+            # Track (agent_site, action_type) to detect position-action loops
+            agent = self.agents[agent_idx] if agent_idx < len(self.agents) else None
+            action_signature = (agent.site_idx if agent else -1, action_idx)
+
+        self._recent_actions.append(action_signature)
+        if len(self._recent_actions) > self._action_history_size:
+            self._recent_actions.pop(0)
+
         # Calculate reward based on change in grand potential
         reward = self._calculate_reward()
+
+        # Detect and penalize loops
+        if self._detect_action_loop():
+            reward -= self._loop_penalty
+
         if not success:
             # If the action was not successful, the grand potential will not have changed.
             # We apply a small penalty to discourage the agent from choosing invalid actions.
@@ -272,10 +327,22 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             action_name = str(ActionType(action_idx).name)
             executed_action = (agent_idx, action_name)
 
+        # Use cached values during episode, only compute at end
+        if terminated or truncated:
+            # Compute final metrics once
+            roughness = self._calculate_roughness_uncached()
+            coverage = self._calculate_coverage_uncached()
+            self._cached_roughness = roughness
+            self._cached_coverage = coverage
+        else:
+            # During episode, use dummy values (not used for training)
+            roughness = 0.0
+            coverage = 0.0
+
         info = {
             "step": self.step_count,
-            "roughness": self._calculate_roughness(),
-            "coverage": self._calculate_coverage(),
+            "roughness": roughness,
+            "coverage": coverage,
             "n_agents": len(self.agents),
             "executed_action": executed_action,
             "reward": reward,
@@ -328,7 +395,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             site_idx: Index of the site that became an agent.
         """
         from src.rl.particle_agent import ParticleAgent
-        
+
         new_agent = ParticleAgent(site_idx=site_idx, lattice=self.lattice)
         agent_idx = len(self.agents)
         self.agents.append(new_agent)
@@ -343,15 +410,15 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """
         if site_idx not in self.site_to_agent_map:
             return
-        
+
         agent_idx = self.site_to_agent_map[site_idx]
-        
+
         # Remove from agents list (swap with last element for O(1) removal)
         last_agent = self.agents[-1]
         if agent_idx < len(self.agents) - 1:
             self.agents[agent_idx] = last_agent
             self.site_to_agent_map[last_agent.site_idx] = agent_idx
-        
+
         self.agents.pop()
         del self.site_to_agent_map[site_idx]
 
@@ -365,7 +432,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         site = self.lattice.sites[site_idx]
         should_be_agent = site.is_occupied()
         is_agent = site_idx in self.site_to_agent_map
-        
+
         if should_be_agent and not is_agent:
             self._add_agent(site_idx)
         elif not should_be_agent and is_agent:
@@ -375,17 +442,20 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """
         Update agents for affected sites and their neighbors.
         This is called after deposition, desorption, or diffusion events.
-        
+
         Args:
             affected_site_indices: Indices of sites that changed.
         """
         sites_to_check = set(affected_site_indices)
-        
+
         # Add neighbors of affected sites
         for site_idx in affected_site_indices:
             site = self.lattice.sites[site_idx]
             sites_to_check.update(site.neighbors)
-        
+
+        # Mark all affected sites as having dirty observations
+        self._dirty_observations.update(sites_to_check)
+
         # Update each affected site
         for site_idx in sites_to_check:
             self._update_agent_at_site(site_idx)
@@ -454,13 +524,26 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 # Update only affected agents incrementally (both source and destination)
                 self._update_affected_agents([from_site_idx, target_site])
 
+                # Update valid deposition sites
+                self._update_deposition_sites_incremental(from_site_idx)
+                self._update_deposition_sites_incremental(target_site)
+
         elif action_idx == ActionType.DESORB.value:
             # Desorption action
             from_site_idx = agent.site_idx
+            old_species = self.lattice.sites[from_site_idx].species
             success, reason = self.lattice.desorb_atom(from_site_idx)
             if success:
+                # Update species count
+                if old_species in self._species_counts:
+                    self._species_counts[old_species] -= 1
+                    self._species_counts[SpeciesType.VACANT] += 1
+
                 # Update only affected agents incrementally
                 self._update_affected_agents([from_site_idx])
+
+                # Update valid deposition sites
+                self._update_deposition_sites_incremental(from_site_idx)
         else:
             return False, f"Unknown action index: {action_idx}"
 
@@ -468,7 +551,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
     def _get_observation(self) -> dict[str, Any]:
         """
-        Get current observation. Optimized to pre-allocate numpy array.
+        Get current observation. Optimized with caching and pre-allocation.
 
         Returns:
             A dictionary containing a list of agent observations and global features.
@@ -481,20 +564,32 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Shape: (num_agents, 58) where 58 is the observation vector size
         agent_observations = np.zeros((num_agents, 58), dtype=np.float32)
 
-        # Populate the array
+        # Populate the array using cache when possible
         for i, agent in enumerate(self.agents):
-            agent_observations[i] = agent.observe().to_vector()
+            site_idx = agent.site_idx
+
+            # Check if observation is cached and not dirty
+            if site_idx in self._observation_cache and site_idx not in self._dirty_observations:
+                # Use cached observation
+                agent_observations[i] = self._observation_cache[site_idx]
+            else:
+                # Compute and cache new observation
+                obs_vector = agent.observe().to_vector()
+                agent_observations[i] = obs_vector
+                self._observation_cache[site_idx] = obs_vector
+                # Remove from dirty set
+                self._dirty_observations.discard(site_idx)
 
         # Global features
         global_features = np.array(
             [
                 self._calculate_mean_height(),
                 self._calculate_height_std(),
-                self._calculate_roughness(),
-                self._calculate_coverage(),
-                self._count_species(SpeciesType.TI),
-                self._count_species(SpeciesType.O),
-                self._count_species(SpeciesType.VACANT),
+                0.0,  # Roughness (not computed during episode)
+                0.0,  # Coverage (not computed during episode)
+                self._species_counts[SpeciesType.TI],
+                self._species_counts[SpeciesType.O],
+                self._species_counts[SpeciesType.VACANT],
             ],
             dtype=np.float32,
         )
@@ -520,16 +615,16 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Grand potential change
         delta_omega = current_omega - self.prev_omega
 
-        # Reward = -ΔΩ (favor stability)
-        reward = -delta_omega
+        # Reward = -ΔΩ (favor stability) - step_penalty (encourage efficiency)
+        reward = -delta_omega - self._step_penalty
 
         # Update previous grand potential for next step
         self.prev_omega = current_omega
 
         return float(reward)
 
-    def _calculate_roughness(self) -> float:
-        """Calculate surface roughness."""
+    def _calculate_roughness_uncached(self) -> float:
+        """Calculate surface roughness (expensive, use sparingly)."""
         if self.lattice is None:
             return 0.0
         try:
@@ -539,14 +634,26 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         except Exception:
             return 0.0
 
-    def _calculate_coverage(self) -> float:
-        """Calculate surface coverage fraction."""
+    def _calculate_roughness(self) -> float:
+        """Get cached roughness or compute if needed."""
+        if self._cached_roughness is None:
+            self._cached_roughness = self._calculate_roughness_uncached()
+        return self._cached_roughness
+
+    def _calculate_coverage_uncached(self) -> float:
+        """Calculate surface coverage fraction (expensive, use sparingly)."""
         if self.lattice is None:
             return 0.0
-        n_atoms = self._count_species(SpeciesType.TI) + self._count_species(SpeciesType.O)
+        n_atoms = self._species_counts[SpeciesType.TI] + self._species_counts[SpeciesType.O]
         nx, ny, _ = self.lattice_size
         total_surface_sites = nx * ny
         return n_atoms / total_surface_sites
+
+    def _calculate_coverage(self) -> float:
+        """Get cached coverage or compute if needed."""
+        if self._cached_coverage is None:
+            self._cached_coverage = self._calculate_coverage_uncached()
+        return self._cached_coverage
 
     def _calculate_mean_height(self) -> float:
         """Calculate mean surface height."""
@@ -563,10 +670,106 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         return float(np.std(heights)) if heights else 0.0
 
     def _count_species(self, species: SpeciesType) -> int:
-        """Count atoms of given species."""
-        if self.lattice is None:
-            return 0
-        return sum(1 for site in self.lattice.sites if site.species == species)
+        """Count atoms of given species (cached, O(1))."""
+        return self._species_counts.get(species, 0)
+
+    def _update_species_counts_full(self) -> None:
+        """Full recount of all species (only at reset)."""
+        self._species_counts = {SpeciesType.TI: 0, SpeciesType.O: 0, SpeciesType.VACANT: 0}
+        for site in self.lattice.sites:
+            if site.species in self._species_counts:
+                self._species_counts[site.species] += 1
+
+    def _update_deposition_sites(self) -> None:
+        """Full rebuild of valid deposition sites (only at reset)."""
+        nx, ny, nz = self.lattice.size
+        self._valid_deposition_sites = []
+
+        for x in range(nx):
+            for y in range(ny):
+                for z in range(1, nz):  # Skip substrate at z=0
+                    site_idx = x + y * nx + z * nx * ny
+                    site = self.lattice.sites[site_idx]
+
+                    if site.species == SpeciesType.VACANT:
+                        site_below_idx = x + y * nx + (z - 1) * nx * ny
+                        site_below = self.lattice.sites[site_below_idx]
+
+                        if site_below.species != SpeciesType.VACANT:
+                            self._valid_deposition_sites.append(site_idx)
+                            break  # Only need first valid site per column
+
+    def _update_deposition_sites_incremental(self, affected_site_idx: int) -> None:
+        """Update valid deposition sites incrementally after a change."""
+        nx, ny, nz = self.lattice.size
+        x, y, z = self.lattice.sites[affected_site_idx].position
+
+        # Remove all sites from this column from valid list
+        self._valid_deposition_sites = [
+            idx for idx in self._valid_deposition_sites
+            if self.lattice.sites[idx].position[0] != x or self.lattice.sites[idx].position[1] != y
+        ]
+
+        # Find new valid site in this column
+        for z_check in range(1, nz):
+            site_idx = x + y * nx + z_check * nx * ny
+            site = self.lattice.sites[site_idx]
+
+            if site.species == SpeciesType.VACANT:
+                site_below_idx = x + y * nx + (z_check - 1) * nx * ny
+                site_below = self.lattice.sites[site_below_idx]
+
+                if site_below.species != SpeciesType.VACANT:
+                    self._valid_deposition_sites.append(site_idx)
+                    break  # Only add first valid site per column
+
+    def _detect_action_loop(self) -> bool:
+        """
+        Detect if the agent is stuck in a loop (e.g., moving back and forth).
+
+        Returns:
+            True if a loop is detected in recent actions.
+        """
+        if len(self._recent_actions) < 2:
+            return False
+
+        # Filter only agent actions (exclude deposits)
+        agent_actions = [a for a in self._recent_actions if a[0] != "DEPOSIT"]
+
+        if len(agent_actions) < 2:
+            return False
+
+        # Check for immediate reversible diffusion: action N and N+1 are opposites
+        # This catches: DIFFUSE_X_POS immediately followed by DIFFUSE_X_NEG
+        last_2 = agent_actions[-2:]
+        site_0, action_0 = last_2[0]
+        site_1, action_1 = last_2[1]
+
+        # Opposite diffusion pairs (value difference of 1)
+        opposite_pairs = [
+            (0, 1), (1, 0),  # X_POS <-> X_NEG
+            (2, 3), (3, 2),  # Y_POS <-> Y_NEG
+            (4, 5), (5, 4),  # Z_POS <-> Z_NEG
+        ]
+
+        if (action_0, action_1) in opposite_pairs:
+            return True
+
+        # Check for 2-step loops: A -> B -> A -> B (same site, same action sequence)
+        if len(agent_actions) >= 4:
+            last_4 = agent_actions[-4:]
+            if (last_4[0] == last_4[2] and last_4[1] == last_4[3] and
+                last_4[0] != last_4[1]):
+                return True
+
+        # Check for 3-action loops: A -> B -> C -> A -> B -> C
+        if len(agent_actions) >= 6:
+            last_6 = agent_actions[-6:]
+            if (last_6[0] == last_6[3] and last_6[1] == last_6[4] and
+                last_6[2] == last_6[5]):
+                return True
+
+        return False
 
     def render(self) -> None:
         """Render environment (text output)."""
