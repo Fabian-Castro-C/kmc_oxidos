@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import importlib.util
+import logging
 import time
 from pathlib import Path
 
@@ -32,6 +33,14 @@ from src.rl.action_selection import select_action_gumbel_max
 from src.rl.action_space import N_ACTIONS
 from src.rl.agent_env import AgentBasedTiO2Env
 from src.rl.shared_policy import Actor, Critic
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # --- Default Configuration (for backward compatibility) ---
 DEFAULT_CONFIG = {
@@ -83,7 +92,7 @@ def parse_args():
 # Parse arguments and load config
 args = parse_args()
 if args.config:
-    print(f"Loading configuration from: {args.config}")
+    logger.info(f"Loading configuration from: {args.config}")
     CONFIG = load_config(args.config)
     # Extract paths if they exist
     if "paths" in CONFIG:
@@ -92,7 +101,7 @@ if args.config:
         results_path = Path("experiments/results/train")
     CONFIG["results_path"] = results_path
 else:
-    print("Using default configuration (debug mode)")
+    logger.info("Using default configuration (debug mode)")
     CONFIG = DEFAULT_CONFIG.copy()
     CONFIG["results_path"] = Path("experiments/results/train")
 
@@ -104,13 +113,13 @@ def main() -> None:
     np.random.seed(CONFIG.get("seed", CONFIG.get("torch_seed", 42)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print("=" * 80)
-    print(f"Training Configuration: {CONFIG.get('project_name', 'TiO2_Training')}")
-    print(f"Run Name: {CONFIG['run_name']}")
-    print(f"Device: {device}")
-    print(f"Lattice Size: {CONFIG['lattice_size']}")
-    print(f"Total Timesteps: {CONFIG['total_timesteps']:,}")
-    print("=" * 80)
+    logger.info("=" * 80)
+    logger.info(f"Training Configuration: {CONFIG.get('project_name', 'TiO2_Training')}")
+    logger.info(f"Run Name: {CONFIG['run_name']}")
+    logger.info(f"Device: {device}")
+    logger.info(f"Lattice Size: {CONFIG['lattice_size']}")
+    logger.info(f"Total Timesteps: {CONFIG['total_timesteps']:,}")
+    logger.info("=" * 80)
 
     # Create a specific directory for this run
     run_dir = CONFIG["results_path"] / CONFIG["run_name"]
@@ -167,14 +176,14 @@ def main() -> None:
         eps=CONFIG["adam_eps"],
     )
 
-    print("Starting training...")
-    print(f"Device: {device}")
-    print(f"Deposition Flux (Ti): {CONFIG['deposition_flux_ti']} ML/s")
-    print(f"Deposition Flux (O): {CONFIG['deposition_flux_o']} ML/s")
-    print(f"Calculated Deposition Logit (Ti): {deposition_logit_ti.item():.4f}")
-    print(f"Calculated Deposition Logit (O): {deposition_logit_o.item():.4f}")
-    print(f"Actor Params: {sum(p.numel() for p in actor.parameters()):,}")
-    print(f"Critic Params: {sum(p.numel() for p in critic.parameters()):,}")
+    logger.info("Starting training...")
+    logger.info(f"Device: {device}")
+    logger.info(f"Deposition Flux (Ti): {CONFIG['deposition_flux_ti']} ML/s")
+    logger.info(f"Deposition Flux (O): {CONFIG['deposition_flux_o']} ML/s")
+    logger.info(f"Calculated Deposition Logit (Ti): {deposition_logit_ti.item():.4f}")
+    logger.info(f"Calculated Deposition Logit (O): {deposition_logit_o.item():.4f}")
+    logger.info(f"Actor Params: {sum(p.numel() for p in actor.parameters()):,}")
+    logger.info(f"Critic Params: {sum(p.numel() for p in critic.parameters()):,}")
 
     # --- PPO Training Loop ---
     global_step = 0
@@ -197,12 +206,12 @@ def main() -> None:
     next_done = torch.zeros(1).to(device)
 
     for update in range(1, num_updates + 1):
-        print(f"\n--- Starting Update {update}/{num_updates} ---")
+        logger.info(f"\n--- Starting Update {update}/{num_updates} ---")
         # --- Rollout Collection Phase ---
-        print("Collecting rollouts...")
+        logger.debug("Collecting rollouts...")
         for _step in range(CONFIG["num_steps"]):
             if _step > 0 and _step % 256 == 0:
-                print(f"  Rollout step {_step}/{CONFIG['num_steps']}...")
+                logger.debug(f"  Rollout step {_step}/{CONFIG['num_steps']}...")
             global_step += 1
             all_dones.append(next_done)
             all_obs.append({"agent_observations": agent_obs, "global_features": global_obs})
@@ -275,9 +284,9 @@ def main() -> None:
             global_obs = next_obs["global_features"]
             next_done = torch.tensor(1.0 if done else 0.0).to(device)
 
-        print("Rollout collection finished.")
+        logger.debug("Rollout collection finished.")
         # --- GAE and Advantage Calculation ---
-        print("Calculating GAE and advantages...")
+        logger.debug("Calculating GAE and advantages...")
         with torch.no_grad():
             # Get value of the last state
             if len(agent_obs) > 0:
@@ -302,22 +311,22 @@ def main() -> None:
                     delta + CONFIG["gamma"] * CONFIG["gae_lambda"] * nextnonterminal * last_gae_lam
                 )
             returns = advantages + torch.cat(all_values).squeeze()
-        print("GAE calculation finished.")
+        logger.debug("GAE calculation finished.")
 
         # --- PPO Update Phase ---
-        print("Starting PPO update phase...")
+        logger.debug("Starting PPO update phase...")
         # Flatten the batch
         b_logprobs = torch.stack(all_logprobs).to(device)
 
         # Optimizing the policy and value network
         for _epoch in range(CONFIG["update_epochs"]):
-            print(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
+            logger.debug(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
             # This is a simplified loop that processes one agent at a time.
             # A more advanced implementation would use minibatches, but that is
             # complex with variable numbers of agents.
             for i in range(len(all_obs)):
                 if i > 0 and i % 256 == 0:
-                    print(f"    Processing batch item {i}/{len(all_obs)}...")
+                    logger.debug(f"    Processing batch item {i}/{len(all_obs)}...")
                 current_agent_obs = all_obs[i]["agent_observations"]
                 current_global_obs = all_obs[i]["global_features"]
                 num_agents = len(current_agent_obs)
@@ -387,7 +396,7 @@ def main() -> None:
                     )
                     optimizer.step()
 
-        print("PPO update phase finished.")
+        logger.debug("PPO update phase finished.")
 
         # Logging
         sps = int(global_step / (time.time() - start_time))
@@ -402,7 +411,7 @@ def main() -> None:
 
         # Log failure reasons for a few steps to debug
         if update == 1 and env.step_info:
-            print("\n--- Sample of Action Outcomes (Update 1) ---")
+            logger.info("\n--- Sample of Action Outcomes (Update 1) ---")
             for i in range(min(20, len(env.step_info))):  # Log first 20 steps
                 info = env.step_info[i]
                 action_str = (
@@ -460,7 +469,7 @@ def main() -> None:
         {"actor_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict()},
         model_path,
     )
-    print(f"Training finished. Model saved to {model_path}")
+    logger.info(f"Training finished. Model saved to {model_path}")
     env.close()
     writer.close()
 
