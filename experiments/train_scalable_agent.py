@@ -190,6 +190,10 @@ def main() -> None:
     start_time = time.time()
     num_updates = CONFIG["total_timesteps"] // CONFIG["num_steps"]
 
+    # Best model tracking
+    best_mean_reward = float('-inf')
+    episode_count = 0
+
     # Rollout storage
     # Note: These are lists because the number of agents varies per step
     all_obs = []  # List of (full_obs_dict)
@@ -318,78 +322,106 @@ def main() -> None:
         # Flatten the batch
         b_logprobs = torch.stack(all_logprobs).to(device)
 
+        # Use minibatch gradient accumulation for efficiency
+        minibatch_size = 256  # Accumulate gradients over 256 steps before updating
+        num_minibatches = len(all_obs) // minibatch_size
+        if len(all_obs) % minibatch_size != 0:
+            num_minibatches += 1
+
         # Optimizing the policy and value network
         for _epoch in range(CONFIG["update_epochs"]):
             logger.info(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
-            # This is a simplified loop that processes one agent at a time.
-            # A more advanced implementation would use minibatches, but that is
-            # complex with variable numbers of agents.
-            for i in range(len(all_obs)):
-                if i > 0 and i % 256 == 0:
-                    logger.info(f"    Processing batch item {i}/{len(all_obs)}...")
-                current_agent_obs = all_obs[i]["agent_observations"]
-                current_global_obs = all_obs[i]["global_features"]
-                num_agents = len(current_agent_obs)
+            
+            # Shuffle indices for each epoch
+            indices = np.random.permutation(len(all_obs))
+            
+            for mb in range(num_minibatches):
+                if mb > 0 and mb % 4 == 0:
+                    logger.info(f"    Processing minibatch {mb}/{num_minibatches}...")
+                
+                # Get minibatch indices
+                start_idx = mb * minibatch_size
+                end_idx = min((mb + 1) * minibatch_size, len(all_obs))
+                mb_indices = indices[start_idx:end_idx]
+                
+                # Accumulate loss over minibatch
+                total_pg_loss = 0.0
+                total_v_loss = 0.0
+                total_entropy = 0.0
+                num_updates = 0
+                
+                optimizer.zero_grad()
+                
+                for i in mb_indices:
+                    current_agent_obs = all_obs[i]["agent_observations"]
+                    current_global_obs = all_obs[i]["global_features"]
+                    num_agents = len(current_agent_obs)
 
+                    # Determine which action was taken
+                    taken_action = all_actions[i]
+                    is_deposition = isinstance(taken_action, str)
 
-                # Determine which action was taken
-                taken_action = all_actions[i]
-                is_deposition = isinstance(taken_action, str)
+                    # We only update the policy for diffusion actions, as deposition is fixed
+                    if not is_deposition and num_agents > 0:
+                        # Recalculate log_probs, entropy, and values
+                        obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
+                        diffusion_logits = actor(obs_tensor)
 
-                # We only update the policy for diffusion actions, as deposition is fixed
-                if not is_deposition and num_agents > 0:
-                    # Recalculate log_probs, entropy, and values
-                    obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
-                    diffusion_logits = actor(obs_tensor)
-
-                    # Apply the saved mask for this specific step
-                    action_mask = torch.from_numpy(all_action_masks[i]).to(device)
-                    if action_mask.shape[0] == diffusion_logits.shape[0]:
+                        # Apply the saved mask for this specific step
+                        action_mask = torch.from_numpy(all_action_masks[i]).to(device)
+                        if action_mask.shape[0] != diffusion_logits.shape[0]:
+                            # Skip if shape mismatch (rare edge case)
+                            continue
+                        
                         diffusion_logits[~action_mask] = -1e9
-                    else:
-                        # This can happen on the last step of an episode if the number of agents changes.
-                        # We can skip this update as it's a minor edge case.
-                        continue
 
-                    all_possible_logits = torch.cat(
-                        [
-                            diffusion_logits.flatten(),
-                            deposition_logit_ti.unsqueeze(0),
-                            deposition_logit_o.unsqueeze(0),
-                        ]
-                    )
-                    dist = torch.distributions.Categorical(logits=all_possible_logits)
+                        all_possible_logits = torch.cat(
+                            [
+                                diffusion_logits.flatten(),
+                                deposition_logit_ti.unsqueeze(0),
+                                deposition_logit_o.unsqueeze(0),
+                            ]
+                        )
+                        dist = torch.distributions.Categorical(logits=all_possible_logits)
 
-                    # Find the index of the action taken in the flattened logit tensor
-                    _agent_idx, action_idx = taken_action
-                    gumbel_action_idx = _agent_idx * action_dim + action_idx
-                    new_logprob = dist.log_prob(
-                        torch.tensor(gumbel_action_idx).to(device)
-                    )
-                    entropy = dist.entropy().mean()
+                        # Find the index of the action taken in the flattened logit tensor
+                        _agent_idx, action_idx = taken_action
+                        gumbel_action_idx = _agent_idx * action_dim + action_idx
+                        new_logprob = dist.log_prob(
+                            torch.tensor(gumbel_action_idx).to(device)
+                        )
+                        entropy = dist.entropy()
 
-                    new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
+                        new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
 
-                    # Policy loss
-                    logratio = new_logprob - b_logprobs[i]
-                    ratio = logratio.exp()
+                        # Policy loss
+                        logratio = new_logprob - b_logprobs[i]
+                        ratio = logratio.exp()
 
-                    adv = advantages[i]
-                    pg_loss1 = -adv * ratio
-                    pg_loss2 = -adv * torch.clamp(
-                        ratio, 1 - CONFIG["clip_coef"], 1 + CONFIG["clip_coef"]
-                    )
-                    pg_loss = torch.max(pg_loss1, pg_loss2)
+                        adv = advantages[i]
+                        pg_loss1 = -adv * ratio
+                        pg_loss2 = -adv * torch.clamp(
+                            ratio, 1 - CONFIG["clip_coef"], 1 + CONFIG["clip_coef"]
+                        )
+                        pg_loss = torch.max(pg_loss1, pg_loss2)
 
-                    # Value loss
-                    v_loss = 0.5 * ((new_value - returns[i]) ** 2).mean()
+                        # Value loss
+                        v_loss = 0.5 * ((new_value - returns[i]) ** 2)
 
-                    # Total loss
-                    entropy_loss = entropy * CONFIG["ent_coef"]
-                    loss = pg_loss - entropy_loss + v_loss * CONFIG["vf_coef"]
-
-                    optimizer.zero_grad()
-                    loss.backward()
+                        # Total loss (accumulate, don't average yet)
+                        loss = pg_loss - entropy * CONFIG["ent_coef"] + v_loss * CONFIG["vf_coef"]
+                        
+                        # Backward pass (accumulates gradients)
+                        loss.backward()
+                        
+                        # Track for logging
+                        total_pg_loss += pg_loss.item()
+                        total_v_loss += v_loss.item()
+                        total_entropy += entropy.item()
+                        num_updates += 1
+                
+                # Update weights once per minibatch
+                if num_updates > 0:
                     torch.nn.utils.clip_grad_norm_(
                         list(actor.parameters()) + list(critic.parameters()),
                         CONFIG["max_grad_norm"],
@@ -403,10 +435,10 @@ def main() -> None:
         mean_reward = np.mean(all_rewards) if all_rewards else 0.0
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("charts/sps", sps, global_step)
-        if "v_loss" in locals():
-            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+        if num_updates > 0:
+            writer.add_scalar("losses/value_loss", total_v_loss / num_updates, global_step)
+            writer.add_scalar("losses/policy_loss", total_pg_loss / num_updates, global_step)
+            writer.add_scalar("losses/entropy", total_entropy / num_updates, global_step)
         writer.add_scalar("charts/mean_reward", mean_reward, global_step)
 
         # Log failure reasons for a few steps to debug
@@ -451,6 +483,38 @@ def main() -> None:
             f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}"
         )
 
+        # Episode tracking and model saving
+        episode_count += 1
+
+        # Save model every 50 episodes
+        if episode_count % 50 == 0:
+            checkpoint_path = model_dir / f"model_episode_{episode_count}.pt"
+            torch.save(
+                {
+                    "actor_state_dict": actor.state_dict(),
+                    "critic_state_dict": critic.state_dict(),
+                    "episode": episode_count,
+                    "mean_reward": mean_reward,
+                },
+                checkpoint_path,
+            )
+            logger.info(f"Checkpoint saved to {checkpoint_path} (Episode {episode_count}, Reward: {mean_reward:.4f})")
+
+        # Track and save best model
+        if mean_reward > best_mean_reward:
+            best_mean_reward = mean_reward
+            best_model_path = model_dir / "best_model.pt"
+            torch.save(
+                {
+                    "actor_state_dict": actor.state_dict(),
+                    "critic_state_dict": critic.state_dict(),
+                    "episode": episode_count,
+                    "mean_reward": mean_reward,
+                },
+                best_model_path,
+            )
+            logger.info(f"New best model saved! Episode {episode_count}, Reward: {mean_reward:.4f}")
+
         # Clear rollout storage
         all_obs, all_actions, all_logprobs, all_rewards, all_dones, all_values, all_action_masks = (
             [],
@@ -466,10 +530,16 @@ def main() -> None:
     # Save final model
     model_path = model_dir / "final_model.pt"
     torch.save(
-        {"actor_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict()},
+        {
+            "actor_state_dict": actor.state_dict(),
+            "critic_state_dict": critic.state_dict(),
+            "episode": episode_count,
+            "mean_reward": mean_reward,
+        },
         model_path,
     )
-    logger.info(f"Training finished. Model saved to {model_path}")
+    logger.info(f"Training finished. Final model saved to {model_path}")
+    logger.info(f"Best model (reward: {best_mean_reward:.4f}) saved to {model_dir / 'best_model.pt'}")
     env.close()
     writer.close()
 
