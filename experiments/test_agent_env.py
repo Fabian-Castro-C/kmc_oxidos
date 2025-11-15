@@ -131,7 +131,7 @@ def test_multi_step_rollout():
     step_count = 0
     max_rollout_steps = 10
 
-    for step in range(max_rollout_steps):
+    for _step in range(max_rollout_steps):
         # Sample random action
         action = env.action_space.sample()
 

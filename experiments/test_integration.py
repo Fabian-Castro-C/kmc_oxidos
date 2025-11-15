@@ -11,8 +11,8 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 
+from experiments.inference_agent_based import load_trained_model, run_episode
 from experiments.train_agent_based import create_agent_env
-from experiments.inference_agent_based import run_episode, load_trained_model
 
 
 def test_train_inference_pipeline():
@@ -84,21 +84,22 @@ def test_train_inference_pipeline():
         height_field = lattice.get_height_profile()
         mean_height = height_field.mean()
         max_height = height_field.max()
-        
+
         # For a tiny, untrained model, lattice might not grow much
         # Just check that the data structures are correct
         print(f"   Mean height: {mean_height:.2f}, Max height: {max_height:.2f}")
-        assert height_field.shape == (config["lattice_size"][0], config["lattice_size"][1]), \
+        assert height_field.shape == (config["lattice_size"][0], config["lattice_size"][1]), (
             "Height field shape mismatch"
+        )
         print(f"   ✓ Height field shape: {height_field.shape}")
 
         # Check: Species counts (may be zero for untrained model)
         composition = lattice.get_composition()
         ti_count = composition.get(1, 0)  # SpeciesType TI
-        o_count = composition.get(2, 0)   # SpeciesType O
+        o_count = composition.get(2, 0)  # SpeciesType O
         total = ti_count + o_count
         print(f"   Total atoms: {total} (Ti={ti_count}, O={o_count})")
-        print(f"   ✓ Composition data structure valid")
+        print("   ✓ Composition data structure valid")
 
         # Check: Coverage evolution (may be flat for untrained model)
         coverages = [info.get("coverage", 0) for info in results["step_info"]]
@@ -216,8 +217,9 @@ def test_reweighting_ess():
         print(f"Max ESS: {np.max(ess_values):.2f}")
 
         # ESS should be positive and finite
-        assert all(np.isfinite(ess) and ess > 0 for ess in ess_values), \
+        assert all(np.isfinite(ess) and ess > 0 for ess in ess_values), (
             "ESS should be positive and finite"
+        )
         print("✓ All ESS values positive and finite")
     else:
         print("⚠ No ESS values recorded (reweighting may be disabled)")
@@ -241,5 +243,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✗ INTEGRATION TEST FAILED: {e}")
         import traceback
+
         traceback.print_exc()
         exit(1)

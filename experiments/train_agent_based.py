@@ -41,14 +41,20 @@ def create_agent_env(config: dict, seed: int = 0) -> AgentBasedTiO2Env:
     Returns:
         AgentBasedTiO2Env instance
     """
+    # Handle temperature or temperature_range
+    temp_kwargs = {}
+    if "temperature" in config:
+        temp_kwargs["temperature"] = config["temperature"]
+    elif "temperature_range" in config:
+        temp_kwargs["temperature_range"] = tuple(config["temperature_range"])
+
     return AgentBasedTiO2Env(
         lattice_size=tuple(config["lattice_size"]),
-        temperature=config["temperature"],
+        **temp_kwargs,
         deposition_rate=config["deposition_rate"],
         max_steps=config["max_steps"],
         max_agents=config["max_agents"],
         use_reweighting=config.get("use_reweighting", True),
-        reward_weights=config.get("reward_weights"),
         seed=seed,
     )
 
@@ -77,7 +83,7 @@ def train_agent_based(
     config = load_config(config_path)
     env_config = config["environment"]
     ppo_config = config.get("ppo", {})
-    
+
     logger.info(f"Configuration: {config_path}")
     logger.info(f"Lattice: {env_config['lattice_size']}")
     logger.info(f"Max agents: {env_config['max_agents']}")
@@ -196,7 +202,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("experiments/agent_based_runs"),
+        default=Path("experiments/results"),
         help="Output directory for models and logs",
     )
     parser.add_argument(
