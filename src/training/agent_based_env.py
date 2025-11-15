@@ -29,6 +29,7 @@ from src.rl.particle_agent import create_agents_from_lattice
 from src.rl.rate_calculator import ActionRateCalculator
 from src.rl.shared_policy import SharedPolicyNetwork
 from src.rl.swarm_coordinator import SwarmCoordinator
+from src.training.energy_calculator import SystemEnergyCalculator
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +72,12 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
     def __init__(
         self,
         lattice_size: tuple[int, int, int] = (8, 8, 5),
-        temperature: float = 600.0,
+        temperature: float | None = None,
+        temperature_range: tuple[float, float] | None = None,
         deposition_rate: float = 1.0,
         max_steps: int = 1000,
         max_agents: int = 128,
         use_reweighting: bool = True,
-        reward_weights: dict[str, float] | None = None,
         seed: int | None = None,
     ) -> None:
         """
@@ -84,36 +85,34 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         Args:
             lattice_size: Lattice dimensions (nx, ny, nz).
-            temperature: Temperature (K).
+            temperature: Fixed temperature (K). Mutually exclusive with temperature_range.
+            temperature_range: Temperature range (T_min, T_max) for curriculum.
+                Sample random temperature each episode.
             deposition_rate: Deposition rate (ML/s).
             max_steps: Maximum steps per episode.
             max_agents: Maximum number of agents (for padding).
             use_reweighting: Use physical rate reweighting (default True).
-            reward_weights: Weights for reward components:
-                - roughness_weight: Roughness penalty (default -1.0)
-                - coverage_weight: Coverage reward (default +0.5)
-                - stoichiometry_weight: Ti:O ratio penalty (default -0.3)
-                - ess_weight: ESS penalty (default -0.1)
             seed: Random seed.
+
+        Note:
+            Reward follows SwarmThinkers paper: r_t = -ΔE (energy-based, no weights needed).
         """
         super().__init__()
 
+        # Temperature handling
+        if temperature is not None and temperature_range is not None:
+            raise ValueError("Specify either temperature or temperature_range, not both")
+        if temperature is None and temperature_range is None:
+            temperature = 600.0  # Default
+
         self.lattice_size = lattice_size
-        self.temperature = temperature
+        self.temperature_fixed = temperature
+        self.temperature_range = temperature_range
+        self.temperature = temperature if temperature is not None else temperature_range[0]
         self.deposition_rate = deposition_rate
         self.max_steps = max_steps
         self.max_agents = max_agents
         self.use_reweighting = use_reweighting
-
-        # Reward weights
-        if reward_weights is None:
-            reward_weights = {
-                "roughness_weight": -1.0,
-                "coverage_weight": 0.5,
-                "stoichiometry_weight": -0.3,
-                "ess_weight": -0.1,
-            }
-        self.reward_weights = reward_weights
 
         # Random seed
         if seed is not None:
@@ -156,18 +155,22 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self.policy: SharedPolicyNetwork | None = None
         self.coordinator: SwarmCoordinator | None = None
         self.agents: list = []
+        self.energy_calculator: SystemEnergyCalculator | None = None
 
         # Episode state
         self.step_count = 0
         self.total_reward = 0.0
         self.episode_info: dict[str, Any] = {}
+        self.prev_energy: float = 0.0  # Track energy for reward calculation
 
         # Metrics tracking
         self.prev_roughness = 0.0
         self.prev_coverage = 0.0
 
     def reset(
-        self, seed: int | None = None, options: dict[str, Any] | None = None
+        self,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,  # noqa: ARG002
     ) -> tuple[dict[str, npt.NDArray], dict[str, Any]]:
         """
         Reset environment to initial state.
@@ -183,6 +186,14 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         if seed is not None:
             np.random.seed(seed)
 
+        # Sample temperature if using range
+        if self.temperature_range is not None:
+            self.temperature = np.random.uniform(
+                self.temperature_range[0], self.temperature_range[1]
+            )
+        else:
+            self.temperature = self.temperature_fixed
+
         # Initialize lattice
         self.lattice = Lattice(size=self.lattice_size)
 
@@ -195,6 +206,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Initialize policy and coordinator
         self.policy = SharedPolicyNetwork(obs_dim=58, action_dim=N_ACTIONS)
         self.coordinator = SwarmCoordinator(self.policy)
+
+        # Initialize energy calculator for reward
+        self.energy_calculator = SystemEnergyCalculator()
 
         # Create initial agents (all sites)
         self.agents = create_agents_from_lattice(self.lattice)
@@ -211,6 +225,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             "n_o": 0,
         }
 
+        # Calculate initial energy for reward computation
+        self.prev_energy = self.energy_calculator.calculate_system_energy(self.lattice)
+
         # Initial metrics
         self.prev_roughness = self._calculate_roughness()
         self.prev_coverage = self._calculate_coverage()
@@ -220,9 +237,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         return observation, info
 
-    def step(
-        self, action: int
-    ) -> tuple[dict[str, npt.NDArray], float, bool, bool, dict[str, Any]]:
+    def step(self, action: int) -> tuple[dict[str, npt.NDArray], float, bool, bool, dict[str, Any]]:
         """
         Execute one environment step.
 
@@ -252,25 +267,21 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             info = {"invalid_action": True, "step": self.step_count}
             return self._get_observation(), reward, terminated, truncated, info
 
-        # Execute event (simplified - just for structure)
-        # In real implementation, would execute the actual lattice update
-        # For now, use coordinator to select event (ignoring action input)
+        # Execute event using coordinator
         if self.use_reweighting:
             selected_event, ess = self.coordinator.select_event_with_reweighting(
                 self.agents, self.lattice, self.rate_calculator, temperature=1.0
             )
         else:
-            selected_event = self.coordinator.select_event(
-                self.agents, temperature=1.0
-            )
+            selected_event = self.coordinator.select_event(self.agents, temperature=1.0)
             ess = None
 
-        # TODO: Execute the selected event on lattice
-        # This would involve:
-        # 1. Get agent and action from selected_event
-        # 2. Execute action on lattice (diffusion, adsorption, etc.)
-        # 3. Update agents list
-        # For now, just continue (step_count already incremented above)
+        # Execute the selected event on lattice
+        success = self._execute_event(selected_event)
+
+        # Update agents list after lattice modification
+        if success:
+            self.agents = create_agents_from_lattice(self.lattice)
 
         # Calculate reward
         reward = self._calculate_reward(ess)
@@ -309,6 +320,111 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         return observation, reward, terminated, truncated, info
 
+    def _execute_event(self, selected_event: Any) -> bool:
+        """
+        Execute the selected event on the lattice.
+
+        Args:
+            selected_event: SelectedEvent from coordinator
+
+        Returns:
+            True if event executed successfully, False otherwise
+        """
+        from src.rl.particle_agent import ActionType
+
+        if self.lattice is None or len(self.agents) == 0:
+            return False
+
+        agent_idx = selected_event.agent_idx
+        action = selected_event.action
+
+        # Validate agent index
+        if agent_idx >= len(self.agents):
+            return False
+
+        agent = self.agents[agent_idx]
+        site = agent.site
+
+        # Execute action based on type
+        if action == ActionType.ADSORB_TI:
+            # Adsorb Ti atom - find vacant site above current position
+            x, y, z = site.position
+            # Try to adsorb on top (z+1)
+            if z + 1 < self.lattice_size[2]:
+                target_site = self.lattice.get_site(x, y, z + 1)
+                if target_site is not None and not target_site.is_occupied():
+                    target_site.species = SpeciesType.TI
+                    return True
+            return False
+
+        elif action == ActionType.ADSORB_O:
+            # Adsorb O atom - find vacant site above current position
+            x, y, z = site.position
+            # Try to adsorb on top (z+1)
+            if z + 1 < self.lattice_size[2]:
+                target_site = self.lattice.get_site(x, y, z + 1)
+                if target_site is not None and not target_site.is_occupied():
+                    target_site.species = SpeciesType.O
+                    return True
+            return False
+
+        elif action == ActionType.DESORB:
+            # Desorb atom
+            if site.is_occupied():
+                site.species = SpeciesType.VACANT
+                return True
+
+        elif action in [
+            ActionType.DIFFUSE_X_POS,
+            ActionType.DIFFUSE_X_NEG,
+            ActionType.DIFFUSE_Y_POS,
+            ActionType.DIFFUSE_Y_NEG,
+            ActionType.DIFFUSE_Z_POS,
+            ActionType.DIFFUSE_Z_NEG,
+        ]:
+            # Diffusion event
+            if not site.is_occupied():
+                return False
+
+            # Get target position
+            x, y, z = site.position
+            if action == ActionType.DIFFUSE_X_POS:
+                target_pos = (x + 1, y, z)
+            elif action == ActionType.DIFFUSE_X_NEG:
+                target_pos = (x - 1, y, z)
+            elif action == ActionType.DIFFUSE_Y_POS:
+                target_pos = (x, y + 1, z)
+            elif action == ActionType.DIFFUSE_Y_NEG:
+                target_pos = (x, y - 1, z)
+            elif action == ActionType.DIFFUSE_Z_POS:
+                target_pos = (x, y, z + 1)
+            else:  # DIFFUSE_Z_NEG
+                target_pos = (x, y, z - 1)
+
+            # Check if target is within bounds
+            nx, ny, nz = self.lattice_size
+            if not (
+                0 <= target_pos[0] < nx and 0 <= target_pos[1] < ny and 0 <= target_pos[2] < nz
+            ):
+                return False
+
+            # Get target site
+            target_site = self.lattice.get_site(target_pos[0], target_pos[1], target_pos[2])
+            if target_site is None or target_site.is_occupied():
+                return False
+
+            # Execute diffusion
+            target_site.species = site.species
+            site.species = SpeciesType.VACANT
+            return True
+
+        elif action == ActionType.REACT_TIO2:
+            # Simplified reaction (not fully implemented)
+            # In full implementation, would check for O neighbors and form TiO2
+            return False
+
+        return False
+
     def _get_observation(self) -> dict[str, npt.NDArray]:
         """
         Get current observation with padding.
@@ -316,8 +432,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         Returns:
             Observation dict with agents, mask, and global features
         """
-        n_agents = len(self.agents)
-
         # Collect agent observations
         agent_obs = np.zeros((self.max_agents, 58), dtype=np.float32)
         mask = np.zeros(self.max_agents, dtype=np.float32)
@@ -347,49 +461,35 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             "global": global_features,
         }
 
-    def _calculate_reward(self, ess: float | None = None) -> float:
+    def _calculate_reward(self, ess: float | None = None) -> float:  # noqa: ARG002
         """
-        Calculate multi-objective reward.
+        Calculate SwarmThinkers reward for an open system: r_t = -ΔΩ.
+
+        A negative change in grand potential (system becomes more stable)
+        results in a positive reward.
 
         Args:
-            ess: Effective sample size (optional)
+            ess: Effective sample size (unused, kept for compatibility)
 
         Returns:
-            Scalar reward
+            Reward r_t = -ΔΩ (eV)
         """
-        roughness = self._calculate_roughness()
-        coverage = self._calculate_coverage()
+        if self.lattice is None or self.energy_calculator is None:
+            return 0.0
 
-        # Roughness penalty (smoother is better)
-        roughness_reward = self.reward_weights["roughness_weight"] * roughness
+        # Calculate current grand potential
+        current_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
 
-        # Coverage reward (more growth is better)
-        coverage_reward = self.reward_weights["coverage_weight"] * coverage
+        # Grand potential change
+        delta_omega = current_omega - self.prev_energy  # prev_energy is now prev_omega
 
-        # Stoichiometry penalty
-        n_ti = self._count_species(SpeciesType.TI)
-        n_o = self._count_species(SpeciesType.O)
-        ideal_ratio = 0.5  # Ti:O = 1:2
-        actual_ratio = n_ti / (n_ti + n_o + 1e-6)
-        stoich_penalty = (
-            self.reward_weights["stoichiometry_weight"]
-            * abs(actual_ratio - ideal_ratio)
-        )
+        # Reward = -ΔΩ (favor stability)
+        reward = -delta_omega
 
-        # ESS penalty (encourage diverse sampling)
-        ess_penalty = 0.0
-        if ess is not None and self.use_reweighting:
-            # Low ESS means concentrated weights (bad)
-            # Normalize by number of valid actions
-            n_valid = sum(len(a.get_valid_actions()) for a in self.agents)
-            ess_normalized = ess / (n_valid + 1e-6)
-            ess_penalty = self.reward_weights["ess_weight"] * (1.0 - ess_normalized)
+        # Update previous grand potential for next step
+        self.prev_energy = current_omega
 
-        total_reward = (
-            roughness_reward + coverage_reward + stoich_penalty + ess_penalty
-        )
-
-        return float(total_reward)
+        return float(reward)
 
     def _calculate_roughness(self) -> float:
         """Calculate surface roughness."""
@@ -405,9 +505,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """Calculate surface coverage fraction."""
         if self.lattice is None:
             return 0.0
-        n_atoms = self._count_species(SpeciesType.TI) + self._count_species(
-            SpeciesType.O
-        )
+        n_atoms = self._count_species(SpeciesType.TI) + self._count_species(SpeciesType.O)
         nx, ny, _ = self.lattice_size
         total_surface_sites = nx * ny
         return n_atoms / total_surface_sites
@@ -442,10 +540,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         print(f"Agents: {len(self.agents)}")
         print(f"Roughness: {self._calculate_roughness():.3f} nm")
         print(f"Coverage: {self._calculate_coverage():.3f}")
-        print(
-            f"Ti: {self._count_species(SpeciesType.TI)}, "
-            f"O: {self._count_species(SpeciesType.O)}"
-        )
+        print(f"Ti: {self._count_species(SpeciesType.TI)}, O: {self._count_species(SpeciesType.O)}")
 
     def close(self) -> None:
         """Clean up resources."""
