@@ -12,8 +12,13 @@ paradigm:
   to estimate the state value.
 - The Actor is decentralized: It is shared among all agents and acts based on
   purely local observations.
+
+Usage:
+    python experiments/train_scalable_agent.py --config experiments/configs/runpod_training.py
 """
 
+import argparse
+import importlib.util
 import time
 from pathlib import Path
 
@@ -28,17 +33,16 @@ from src.rl.action_space import N_ACTIONS
 from src.rl.agent_env import AgentBasedTiO2Env
 from src.rl.shared_policy import Actor, Critic
 
-# --- Configuration ---
-# Hyperparameters (placeholders, to be tuned)
-CONFIG = {
+# --- Default Configuration (for backward compatibility) ---
+DEFAULT_CONFIG = {
     "project_name": "Scalable_TiO2_PPO",
     "run_name": f"run_{int(time.time())}",
-    "torch_seed": 42,
+    "seed": 42,
     "lattice_size": (5, 5, 8),
-    "deposition_flux_ti": 0.1,  # Ti monolayers per second
-    "deposition_flux_o": 0.2,  # O monolayers per second (often higher in practice)
-    "total_timesteps": 512,  # Short run for debugging
-    "num_steps": 128,  # Number of steps to run for each environment per update
+    "deposition_flux_ti": 0.1,
+    "deposition_flux_o": 0.2,
+    "total_timesteps": 512,
+    "num_steps": 128,
     "learning_rate": 3e-4,
     "gamma": 0.99,
     "gae_lambda": 0.95,
@@ -49,16 +53,64 @@ CONFIG = {
     "adam_eps": 1e-5,
     "target_kl": None,
     "update_epochs": 10,
-    "results_path": Path("experiments/results/train"),
+    "actor_hidden_dims": [256, 256],
+    "critic_hidden_dims": [256, 256],
+    "actor_activation": "tanh",
+    "critic_activation": "tanh",
 }
+
+
+def load_config(config_path: str) -> dict:
+    """Load configuration from a Python file."""
+    spec = importlib.util.spec_from_file_location("config_module", config_path)
+    config_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(config_module)
+    return config_module.CONFIG
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Train SwarmThinkers TiO2 agent")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to configuration file (Python file with CONFIG dict)",
+    )
+    return parser.parse_args()
+
+
+# Parse arguments and load config
+args = parse_args()
+if args.config:
+    print(f"Loading configuration from: {args.config}")
+    CONFIG = load_config(args.config)
+    # Extract paths if they exist
+    if "paths" in CONFIG:
+        results_path = CONFIG["paths"].get("results_dir", Path("experiments/results/train"))
+    else:
+        results_path = Path("experiments/results/train")
+    CONFIG["results_path"] = results_path
+else:
+    print("Using default configuration (debug mode)")
+    CONFIG = DEFAULT_CONFIG.copy()
+    CONFIG["results_path"] = Path("experiments/results/train")
 
 
 def main() -> None:
     """Main training function."""
     # Setup
-    torch.manual_seed(CONFIG["torch_seed"])
-    np.random.seed(CONFIG["torch_seed"])
+    torch.manual_seed(CONFIG.get("seed", CONFIG.get("torch_seed", 42)))
+    np.random.seed(CONFIG.get("seed", CONFIG.get("torch_seed", 42)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    print("=" * 80)
+    print(f"Training Configuration: {CONFIG.get('project_name', 'TiO2_Training')}")
+    print(f"Run Name: {CONFIG['run_name']}")
+    print(f"Device: {device}")
+    print(f"Lattice Size: {CONFIG['lattice_size']}")
+    print(f"Total Timesteps: {CONFIG['total_timesteps']:,}")
+    print("=" * 80)
 
     # Create a specific directory for this run
     run_dir = CONFIG["results_path"] / CONFIG["run_name"]
@@ -74,7 +126,7 @@ def main() -> None:
     env = AgentBasedTiO2Env(
         lattice_size=CONFIG["lattice_size"],
         tio2_parameters=params,
-        max_steps=CONFIG["num_steps"],
+        max_steps=CONFIG.get("max_steps_per_episode", CONFIG["num_steps"]),
     )
     n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
     deposition_logit_ti = torch.tensor(
@@ -89,8 +141,24 @@ def main() -> None:
     obs_dim = env.single_agent_observation_space.shape[0]
     global_obs_dim = env.global_feature_space.shape[0]
     action_dim = N_ACTIONS
-    actor = Actor(obs_dim=obs_dim, action_dim=action_dim).to(device)
-    critic = Critic(obs_dim=global_obs_dim).to(device)
+    
+    # Get architecture from config or use defaults
+    actor_hidden = CONFIG.get("actor_hidden_dims", [256, 256])
+    critic_hidden = CONFIG.get("critic_hidden_dims", [256, 256])
+    actor_activation = CONFIG.get("actor_activation", "tanh")
+    critic_activation = CONFIG.get("critic_activation", "tanh")
+    
+    actor = Actor(
+        obs_dim=obs_dim, 
+        action_dim=action_dim,
+        hidden_dims=actor_hidden,
+        activation=actor_activation
+    ).to(device)
+    critic = Critic(
+        obs_dim=global_obs_dim,
+        hidden_dims=critic_hidden,
+        activation=critic_activation
+    ).to(device)
 
     # Optimizer - Note: deposition_logit is NOT included here as it's a fixed parameter
     optimizer = optim.Adam(
