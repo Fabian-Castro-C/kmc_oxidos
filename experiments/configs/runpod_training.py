@@ -43,7 +43,7 @@ ENV_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 3e-4,  # Standard for PPO, works well with Adam
+    "learning_rate": 1e-4,  # Reduced for stability (was 3e-4)
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -54,7 +54,7 @@ PPO_CONFIG = {
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.01,  # Entropy bonus - INCREASED for exploration (was 0.0)
+    "ent_coef": 0.05,  # Entropy bonus - INCREASED for exploration to escape local optima
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
