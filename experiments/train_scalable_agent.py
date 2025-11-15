@@ -194,7 +194,7 @@ def main() -> None:
     if CONFIG.get("resume_from_checkpoint") is not None:
         checkpoint_path = CONFIG["resume_from_checkpoint"]
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
         actor.load_state_dict(checkpoint["actor_state_dict"])
         critic.load_state_dict(checkpoint["critic_state_dict"])
         episode_count = checkpoint.get("episode", 0)
