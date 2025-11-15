@@ -25,7 +25,7 @@ from src.analysis.roughness import calculate_roughness
 from src.data.tio2_parameters import TiO2Parameters
 from src.kmc.lattice import Lattice, SpeciesType
 from src.rl.action_space import N_ACTIONS, ActionType, create_action_mask
-from src.rl.particle_agent import ParticleAgent, create_agents_from_lattice
+from src.rl.particle_agent import create_agents_from_lattice
 from src.rl.rate_calculator import ActionRateCalculator
 
 from .energy_calculator import SystemEnergyCalculator
@@ -57,7 +57,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
     def __init__(
         self,
-        lattice_size: tuple[int, int, int] = (8, 8, 5),
+        lattice_size: tuple[int, int, int] = (8, 8, 50),
         tio2_parameters: TiO2Parameters | None = None,
         temperature: float | None = None,
         temperature_range: tuple[float, float] | None = None,
@@ -91,7 +91,11 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self.tio2_params = tio2_parameters if tio2_parameters else TiO2Parameters()
         self.temperature_fixed = temperature
         self.temperature_range = temperature_range
-        self.temperature = temperature if temperature is not None else (temperature_range[0] if temperature_range else 600.0)
+        self.temperature = (
+            temperature
+            if temperature is not None
+            else (temperature_range[0] if temperature_range else 600.0)
+        )
         self.deposition_rate = deposition_rate
         self.max_steps = max_steps
         self.use_reweighting = use_reweighting
@@ -110,15 +114,16 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self.global_feature_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
         )
-        self.observation_space = spaces.Dict({
-            "agent_observations": self.single_agent_observation_space, # Placeholder for shape
-            "global_features": self.global_feature_space,
-        })
+        self.observation_space = spaces.Dict(
+            {
+                "agent_observations": self.single_agent_observation_space,  # Placeholder for shape
+                "global_features": self.global_feature_space,
+            }
+        )
 
         # The action space is now decoupled from a fixed max_agents value.
         # The training loop will select between agent actions and global actions.
-        self.action_space = spaces.Discrete(N_ACTIONS) # For a single agent
-
+        self.action_space = spaces.Discrete(N_ACTIONS)  # For a single agent
 
         # Initialize components (will be (re)created in reset())
         self.lattice: Lattice = Lattice(size=self.lattice_size)
@@ -126,7 +131,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             temperature=self.temperature,
             deposition_rate=self.deposition_rate,
         )
-        self.energy_calculator: SystemEnergyCalculator = SystemEnergyCalculator(params=self.tio2_params)
+        self.energy_calculator: SystemEnergyCalculator = SystemEnergyCalculator(
+            params=self.tio2_params
+        )
         self.agents: list = []
 
         # Episode state
@@ -135,7 +142,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self.episode_info: dict[str, Any] = {}
         self.prev_omega: float = 0.0  # Track grand potential for reward calculation
         self.step_info: list[dict[str, Any]] = []
-        self.step_info: list[dict[str, Any]] = [] # Store info for logging
+        self.step_info: list[dict[str, Any]] = []  # Store info for logging
 
     def reset(
         self,
@@ -166,7 +173,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 self.temperature_range[0], self.temperature_range[1]
             )
         else:
-            self.temperature = self.temperature_fixed if self.temperature_fixed is not None else 600.0
+            self.temperature = (
+                self.temperature_fixed if self.temperature_fixed is not None else 600.0
+            )
 
         # Initialize lattice
         self.lattice = Lattice(size=self.lattice_size)
@@ -180,7 +189,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             deposition_rate=self.deposition_rate,
         )
         self.energy_calculator = SystemEnergyCalculator(params=self.tio2_params)
-
 
         # Create initial agents (surface sites)
         self._update_agents()
@@ -205,9 +213,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         return observation, info
 
-    def step(
-        self, action: tuple[int, int] | str
-    ) -> tuple[dict, float, bool, bool, dict]:
+    def step(self, action: tuple[int, int] | str) -> tuple[dict, float, bool, bool, dict]:
         """
         Execute one time step within the environment.
 
@@ -221,7 +227,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         if is_deposition_action:
             if action == "DEPOSIT_TI":
-                success, reason = self._execute_deposition(species=SpeciesType.Ti)
+                success, reason = self._execute_deposition(species=SpeciesType.TI)
             elif action == "DEPOSIT_O":
                 success, reason = self._execute_deposition(species=SpeciesType.O)
             else:
@@ -236,11 +242,15 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 terminated = False
                 truncated = self.step_count >= self.max_steps
                 reason = f"Agent index {agent_idx} out of bounds ({len(self.agents)} agents)."
-                info = {"failure_reason": reason, "step": self.step_count, "n_agents": len(self.agents)}
+                info = {
+                    "failure_reason": reason,
+                    "step": self.step_count,
+                    "n_agents": len(self.agents),
+                }
                 return self._get_observation(), reward, terminated, truncated, info
 
-            agent = self.agents[agent_idx]
-            action_enum = ActionType(action_idx)
+            _agent = self.agents[agent_idx]
+            _action_enum = ActionType(action_idx)
             success, reason = self._execute_agent_action(agent_idx, action_idx)
 
         # Update agents list after lattice modification
@@ -250,7 +260,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Calculate reward based on change in grand potential
         reward = self._calculate_reward()
         if not success and reward == 0:
-            reward = -0.01 # Penalize actions that do nothing
+            reward = -0.01  # Penalize actions that do nothing
         self.total_reward += reward
 
         # Check termination conditions
@@ -258,13 +268,18 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         truncated = self.step_count >= self.max_steps
 
         # Prepare info dict
-        action_name = "DEPOSITION" if is_deposition_action else str(ActionType(action_idx))
+        if is_deposition_action:
+            executed_action = action  # This will be "DEPOSIT_TI" or "DEPOSIT_O"
+        else:
+            action_name = str(ActionType(action_idx).name)
+            executed_action = (agent_idx, action_name)
+
         info = {
             "step": self.step_count,
             "roughness": self._calculate_roughness(),
             "coverage": self._calculate_coverage(),
             "n_agents": len(self.agents),
-            "executed_action": (agent_idx, action_name),
+            "executed_action": executed_action,
             "reward": reward,
             "success": success,
             "failure_reason": reason,
@@ -273,14 +288,16 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # At the end of an episode, populate final stats
         if terminated or truncated:
-            self.episode_info.update({
-                "episode_length": self.step_count,
-                "episode_reward": self.total_reward,
-                "final_roughness": info["roughness"],
-                "final_coverage": info["coverage"],
-                "n_ti": self._count_species(SpeciesType.TI),
-                "n_o": self._count_species(SpeciesType.O),
-            })
+            self.episode_info.update(
+                {
+                    "episode_length": self.step_count,
+                    "episode_reward": self.total_reward,
+                    "final_roughness": info["roughness"],
+                    "final_coverage": info["coverage"],
+                    "n_ti": self._count_species(SpeciesType.TI),
+                    "n_o": self._count_species(SpeciesType.O),
+                }
+            )
             info.update(self.episode_info)
 
         # Store step info for logging
@@ -298,7 +315,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             A numpy array of shape (n_agents, N_ACTIONS) where True indicates a
             valid action.
         """
-        return create_action_mask(self.agents)
+        return create_action_mask(self.agents, self.lattice.size, self.lattice)
 
     def _update_agents(self) -> None:
         """
@@ -308,25 +325,39 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self.agents = create_agents_from_lattice(self.lattice)
 
     def _execute_deposition(self, species: SpeciesType) -> tuple[bool, str]:
-        """Executes a global deposition event for a given species."""
-        # Choose a random (x, y) column for deposition
-        nx, ny, nz = self.lattice_size
-        x, y = np.random.randint(0, nx), np.random.randint(0, ny)
+        """
+        Executes a global deposition event for a given species.
+        Tries random columns until finding an available spot or exhausting all options.
+        """
+        nx, ny, nz = self.lattice.size
 
-        # Find the highest atom in that column to deposit on top of it
-        z_top = self.lattice.get_surface_height(x, y)
+        # Create list of all columns and shuffle them
+        all_columns = [(x, y) for x in range(nx) for y in range(ny)]
+        np.random.shuffle(all_columns)
 
-        # Ensure we don't deposit outside the lattice height
-        if z_top + 1 >= self.lattice.size[2]:
-            return False, "Deposition failed: column is full"
+        # Try each column until we find one with space
+        for x, y in all_columns:
+            # Search upward from z=1 (skip z=0, it's the substrate) to find first vacant site with support
+            for z in range(1, nz):  # Start from z=1, not z=0
+                site_idx = x + y * nx + z * nx * ny
+                site = self.lattice.sites[site_idx]
 
-        # Deposit the new atom
-        success, reason = self.lattice.deposit_atom(
-            x, y, z_top + 1, species=species
-        )
-        if success:
-            self._synchronize_agents_with_lattice()
-        return success, reason
+                if site.species == SpeciesType.VACANT:
+                    # Check if site below is occupied (provides support)
+                    # Support can be SUBSTRATE, TI, or O (anything except VACANT)
+                    site_below_idx = x + y * nx + (z - 1) * nx * ny
+                    site_below = self.lattice.sites[site_below_idx]
+
+                    if site_below.species != SpeciesType.VACANT:
+                        # Found valid deposition site with support (below is SUBSTRATE, TI, or O)
+                        success, reason = self.lattice.deposit_atom(site_idx, species)
+                        if success:
+                            self._update_agents()
+                        return success, reason
+                    # This vacant site doesn't have support, check next z level
+
+        # All columns exhausted - lattice is completely full
+        return False, "Deposition failed: all columns are full"
 
     def _execute_agent_action(self, agent_idx: int, action_idx: int) -> tuple[bool, str]:
         """
@@ -344,28 +375,22 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             ActionType.DIFFUSE_Z_POS.value,
             ActionType.DIFFUSE_Z_NEG.value,
         ]:
-            initial_energy = self.lattice.calculate_site_energy(
-                agent.site_index, agent.species, self.tio2_parameters
-            )
             action_enum = ActionType(action_idx)
             target_site = agent.get_neighbor_site(action_enum, self.lattice.size)
 
             if target_site is None:
                 return False, f"Diffusion failed: invalid move for action {action_enum.name}"
 
-            success, reason = self.lattice.diffuse_atom(agent.site_index, target_site)
+            success, reason = self.lattice.diffuse_atom(agent.site_idx, target_site)
 
         elif action_idx == ActionType.DESORB.value:
             # Desorption action
-            initial_energy = self.lattice.calculate_site_energy(
-                agent.site_index, agent.species, self.tio2_parameters
-            )
-            success, reason = self.lattice.desorb_atom(agent.site_index)
+            success, reason = self.lattice.desorb_atom(agent.site_idx)
         else:
             return False, f"Unknown action index: {action_idx}"
 
         if success:
-            self._synchronize_agents_with_lattice()
+            self._update_agents()
         return success, reason
 
     def _get_observation(self) -> dict[str, Any]:

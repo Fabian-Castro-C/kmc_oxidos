@@ -200,17 +200,23 @@ class Lattice:
             if has_support:
                 self.surface_sites.add(idx)
 
-    def deposit_atom(self, site_idx: int, species: SpeciesType) -> None:
+    def deposit_atom(self, site_idx: int, species: SpeciesType) -> tuple[bool, str]:
         """
         Deposit an atom at a given site.
 
         Args:
             site_idx: Index of the site.
             species: Species to deposit.
+
+        Returns:
+            Tuple of (success, reason).
         """
+        if site_idx < 0 or site_idx >= len(self.sites):
+            return False, f"Invalid site index: {site_idx}"
+
         site = self.sites[site_idx]
         if site.species != SpeciesType.VACANT:
-            raise ValueError(f"Site {site_idx} is already occupied")
+            return False, f"Site {site_idx} is already occupied by {site.species.name}"
 
         site.species = species
         self._update_coordination(site_idx)
@@ -218,8 +224,9 @@ class Lattice:
         x, y, z = site.position
         if z > self._surface_height_map[x, y]:
             self._surface_height_map[x, y] = z
+        return True, "Deposition successful"
 
-    def remove_atom(self, site_idx: int) -> SpeciesType:
+    def desorb_atom(self, site_idx: int) -> tuple[bool, str]:
         """
         Remove an atom from a site (desorption).
 
@@ -227,41 +234,55 @@ class Lattice:
             site_idx: Index of the site.
 
         Returns:
-            Species that was removed.
+            Tuple of (success, reason).
         """
+        if site_idx < 0 or site_idx >= len(self.sites):
+            return False, f"Invalid site index: {site_idx}"
+
         site = self.sites[site_idx]
         if not site.is_occupied():
-            raise ValueError(f"Site {site_idx} is vacant")
+            return False, f"Site {site_idx} is vacant"
 
         old_species = site.species
         site.species = SpeciesType.VACANT
         self._update_coordination(site_idx)
         self._update_surface_sites()
 
-        return old_species
+        return True, f"Desorbed {old_species.name}"
 
-    def move_atom(self, from_idx: int, to_idx: int) -> None:
+    def diffuse_atom(self, from_idx: int, to_idx: int) -> tuple[bool, str]:
         """
         Move an atom from one site to another (diffusion).
 
         Args:
             from_idx: Source site index.
             to_idx: Destination site index.
+
+        Returns:
+            Tuple of (success, reason).
         """
+        if from_idx < 0 or from_idx >= len(self.sites):
+            return False, f"Invalid source site index: {from_idx}"
+        if to_idx < 0 or to_idx >= len(self.sites):
+            return False, f"Invalid destination site index: {to_idx}"
+
         from_site = self.sites[from_idx]
         to_site = self.sites[to_idx]
 
         if not from_site.is_occupied():
-            raise ValueError(f"Source site {from_idx} is vacant")
+            return False, f"Source site {from_idx} is vacant"
         if to_site.is_occupied():
-            raise ValueError(f"Destination site {to_idx} is occupied")
+            return False, f"Destination site {to_idx} is occupied by {to_site.species.name}"
 
-        to_site.species = from_site.species
+        species = from_site.species
+        to_site.species = species
         from_site.species = SpeciesType.VACANT
 
         self._update_coordination(from_idx)
         self._update_coordination(to_idx)
         self._update_surface_sites()
+
+        return True, f"Diffused {species.name}"
 
     def _update_coordination(self, site_idx: int) -> None:
         """Update coordination number for a site and its neighbors."""
@@ -310,26 +331,26 @@ class Lattice:
             - 'vacant': Vacant sites
         """
         counts = {
-            'ti_free': 0,
-            'ti_oxide': 0,
-            'o_free': 0,
-            'o_oxide': 0,
-            'vacant': 0,
+            "ti_free": 0,
+            "ti_oxide": 0,
+            "o_free": 0,
+            "o_oxide": 0,
+            "vacant": 0,
         }
 
         for site in self.sites:
             if site.species == SpeciesType.TI:
                 if site.is_in_oxide:
-                    counts['ti_oxide'] += 1
+                    counts["ti_oxide"] += 1
                 else:
-                    counts['ti_free'] += 1
+                    counts["ti_free"] += 1
             elif site.species == SpeciesType.O:
                 if site.is_in_oxide:
-                    counts['o_oxide'] += 1
+                    counts["o_oxide"] += 1
                 else:
-                    counts['o_free'] += 1
+                    counts["o_free"] += 1
             elif site.species == SpeciesType.VACANT:
-                counts['vacant'] += 1
+                counts["vacant"] += 1
 
         return counts
 
@@ -386,7 +407,9 @@ class Lattice:
         if site_idx1 in site2.bonded_to:
             site2.bonded_to.remove(site_idx1)
 
-    def get_bonded_neighbors(self, site_idx: int, species_filter: SpeciesType | None = None) -> list[int]:
+    def get_bonded_neighbors(
+        self, site_idx: int, species_filter: SpeciesType | None = None
+    ) -> list[int]:
         """
         Get list of neighboring sites that could form bonds.
 
@@ -402,7 +425,9 @@ class Lattice:
 
         for neighbor_idx in site.neighbors:
             neighbor = self.sites[neighbor_idx]
-            if neighbor.is_occupied() and (species_filter is None or neighbor.species == species_filter):
+            if neighbor.is_occupied() and (
+                species_filter is None or neighbor.species == species_filter
+            ):
                 candidates.append(neighbor_idx)
 
         return candidates

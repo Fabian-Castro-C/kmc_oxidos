@@ -351,6 +351,25 @@ def main() -> None:
                         f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
                     )
 
+        # Log for last update to see what's happening
+        if update == num_updates and env.step_info:
+            print(f"\n--- Sample of Action Outcomes (Update {update}) ---")
+            for i in range(min(20, len(env.step_info))):  # Log first 20 steps
+                info = env.step_info[i]
+                action_str = (
+                    info["executed_action"]
+                    if isinstance(info["executed_action"], str)
+                    else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                )
+                if not info["success"]:
+                    print(
+                        f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+                    )
+                else:
+                    print(
+                        f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                    )
+
         print(
             f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}"
         )

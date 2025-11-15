@@ -264,6 +264,57 @@ class ParticleAgent:
         else:
             return []
 
+    def get_neighbors(self, lattice_size: tuple[int, int, int]) -> dict[ActionType, int]:
+        """
+        Gets a dictionary mapping diffusion actions to neighbor site indices.
+
+        Args:
+            lattice_size: The (nx, ny, nz) dimensions of the lattice.
+
+        Returns:
+            A dictionary where keys are diffusion ActionTypes and values are
+            the corresponding neighbor site indices.
+        """
+        neighbors = {}
+        nx, ny, _ = lattice_size
+        x, y, z = self.position
+
+        # Map action to position change
+        action_offsets = {
+            ActionType.DIFFUSE_X_POS: (1, 0, 0),
+            ActionType.DIFFUSE_X_NEG: (-1, 0, 0),
+            ActionType.DIFFUSE_Y_POS: (0, 1, 0),
+            ActionType.DIFFUSE_Y_NEG: (0, -1, 0),
+            ActionType.DIFFUSE_Z_POS: (0, 0, 1),
+            ActionType.DIFFUSE_Z_NEG: (0, 0, -1),
+        }
+
+        for action, (dx, dy, dz) in action_offsets.items():
+            nx_pos, ny_pos, nz_pos = x + dx, y + dy, z + dz
+
+            # Check boundaries (no periodic boundary in z)
+            if 0 <= nx_pos < nx and 0 <= ny_pos < ny and 0 <= nz_pos < lattice_size[2]:
+                neighbor_idx = nx_pos + ny_pos * nx + nz_pos * nx * ny
+                neighbors[action] = neighbor_idx
+
+        return neighbors
+
+    def get_neighbor_site(
+        self, action: ActionType, lattice_size: tuple[int, int, int]
+    ) -> int | None:
+        """
+        Gets the site index for a specific diffusion action.
+
+        Args:
+            action: The diffusion action to perform.
+            lattice_size: The (nx, ny, nz) dimensions of the lattice.
+
+        Returns:
+            The neighbor site index, or None if the action is invalid or out of bounds.
+        """
+        neighbors = self.get_neighbors(lattice_size)
+        return neighbors.get(action, None)
+
     def __repr__(self) -> str:
         """String representation."""
         return f"ParticleAgent(pos={self.position}, species={self.species.name})"
@@ -273,38 +324,25 @@ def create_agents_from_lattice(lattice: Lattice) -> list[ParticleAgent]:
     """
     Create a list of agents from the current lattice state.
 
-    Agents are defined as:
-    1. All occupied sites on the surface (top-most atoms).
-    2. All vacant sites on or just above the surface.
+    Agents are defined as all occupied sites on the surface (top-most atoms).
+    With the new deposition model, vacant sites do not have agents since
+    deposition is a global event, not an agent decision.
 
-    This uses the optimized `get_surface_sites` and `get_vacant_surface_sites`
-    methods from the Lattice class.
+    This uses the optimized `get_surface_sites` method from the Lattice class.
     """
     agents = []
     nx, ny, _ = lattice.size
-    
+
     # A helper function to calculate index from position
     def get_site_index(pos: tuple[int, int, int]) -> int:
         x, y, z = pos
         return x + y * nx + z * nx * ny
 
-    # Add agents for occupied surface sites
+    # Add agents only for occupied surface sites
     surface_sites = lattice.get_surface_sites()
     for site in surface_sites:
         if site.is_occupied():
             site_idx = get_site_index(site.position)
             agents.append(ParticleAgent(site_idx=site_idx, lattice=lattice))
 
-    # Add agents for vacant surface sites
-    vacant_surface_sites = lattice.get_vacant_surface_sites()
-    for site in vacant_surface_sites:
-        # The vacant sites can include occupied sites' locations if they are near the surface.
-        # We only want to add agents for truly vacant spots.
-        if not site.is_occupied():
-            site_idx = get_site_index(site.position)
-            # Check to prevent adding a duplicate agent if a site is in both lists
-            is_already_agent = any(agent.site_idx == site_idx for agent in agents)
-            if not is_already_agent:
-                agents.append(ParticleAgent(site_idx=site_idx, lattice=lattice))
-    
     return agents

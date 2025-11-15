@@ -41,7 +41,7 @@ class ActionType(Enum):
 
 
 def create_action_mask(
-    agents: list[ParticleAgent], lattice_size: tuple[int, int, int]
+    agents: list[ParticleAgent], lattice_size: tuple[int, int, int], lattice = None
 ) -> npt.NDArray[np.bool_]:
     """
     Creates a boolean mask for valid actions for each agent.
@@ -53,6 +53,7 @@ def create_action_mask(
     Args:
         agents: A list of `ParticleAgent` instances.
         lattice_size: The (x, y, z) dimensions of the lattice.
+        lattice: The Lattice object (optional, for accurate occupancy checking).
 
     Returns:
         A boolean numpy array of shape (num_agents, N_ACTIONS).
@@ -64,9 +65,16 @@ def create_action_mask(
     if num_agents == 0:
         return mask
 
-    # Get all agent positions and occupied sites for efficient checking
-    agent_positions = np.array([agent.site_index for agent in agents])
-    occupied_sites = {agent.site_index for agent in agents}
+    # Get all agent positions
+    agent_positions = np.array([agent.site_idx for agent in agents])
+
+    # Get ALL occupied sites from lattice if available, otherwise fall back to agent positions
+    if lattice is not None:
+        from src.kmc.lattice import SpeciesType
+        occupied_sites = {i for i, site in enumerate(lattice.sites)
+                         if site.species != SpeciesType.VACANT}
+    else:
+        occupied_sites = {agent.site_idx for agent in agents}
     lx, ly, lz = lattice_size
 
     # Vectorized boundary and neighbor calculations
