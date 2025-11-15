@@ -323,112 +323,93 @@ def main() -> None:
         # Flatten the batch
         b_logprobs = torch.stack(all_logprobs).to(device)
 
-        # Use minibatch gradient accumulation for efficiency
-        minibatch_size = 256  # Accumulate gradients over 256 steps before updating
-        num_minibatches = len(all_obs) // minibatch_size
-        if len(all_obs) % minibatch_size != 0:
-            num_minibatches += 1
+        # Tracking for logging
+        total_pg_loss = 0.0
+        total_v_loss = 0.0
+        total_entropy = 0.0
+        num_policy_updates = 0
 
         # Optimizing the policy and value network
         for _epoch in range(CONFIG["update_epochs"]):
             logger.info(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
 
-            # Shuffle indices for each epoch
-            indices = np.random.permutation(len(all_obs))
+            for i in range(len(all_obs)):
+                if i > 0 and i % 256 == 0:
+                    logger.info(f"    Processing batch item {i}/{len(all_obs)}...")
+                current_agent_obs = all_obs[i]["agent_observations"]
+                current_global_obs = all_obs[i]["global_features"]
+                num_agents = len(current_agent_obs)
 
-            for mb in range(num_minibatches):
-                if mb > 0 and mb % 4 == 0:
-                    logger.info(f"    Processing minibatch {mb}/{num_minibatches}...")
+                # Determine which action was taken
+                taken_action = all_actions[i]
+                is_deposition = isinstance(taken_action, str)
 
-                # Get minibatch indices
-                start_idx = mb * minibatch_size
-                end_idx = min((mb + 1) * minibatch_size, len(all_obs))
-                mb_indices = indices[start_idx:end_idx]
+                # We only update the policy for diffusion actions, as deposition is fixed
+                if not is_deposition and num_agents > 0:
+                    # Recalculate log_probs, entropy, and values with current policy
+                    obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
+                    diffusion_logits = actor(obs_tensor)
 
-                # Accumulate loss over minibatch
-                total_pg_loss = 0.0
-                total_v_loss = 0.0
-                total_entropy = 0.0
-                num_updates = 0
+                    # Apply the saved mask for this specific step
+                    action_mask = torch.from_numpy(all_action_masks[i]).to(device)
+                    if action_mask.shape[0] != diffusion_logits.shape[0]:
+                        # Skip if shape mismatch (rare edge case)
+                        continue
 
-                optimizer.zero_grad()
+                    diffusion_logits[~action_mask] = -1e9
 
-                for i in mb_indices:
-                    current_agent_obs = all_obs[i]["agent_observations"]
-                    current_global_obs = all_obs[i]["global_features"]
-                    num_agents = len(current_agent_obs)
+                    all_possible_logits = torch.cat(
+                        [
+                            diffusion_logits.flatten(),
+                            deposition_logit_ti.unsqueeze(0),
+                            deposition_logit_o.unsqueeze(0),
+                        ]
+                    )
+                    dist = torch.distributions.Categorical(logits=all_possible_logits)
 
-                    # Determine which action was taken
-                    taken_action = all_actions[i]
-                    is_deposition = isinstance(taken_action, str)
+                    # Find the index of the action taken in the flattened logit tensor
+                    _agent_idx, action_idx = taken_action
+                    gumbel_action_idx = _agent_idx * action_dim + action_idx
+                    new_logprob = dist.log_prob(torch.tensor(gumbel_action_idx).to(device))
+                    entropy = dist.entropy().mean()
 
-                    # We only update the policy for diffusion actions, as deposition is fixed
-                    if not is_deposition and num_agents > 0:
-                        # Recalculate log_probs, entropy, and values with current policy
-                        # NOTE: We still need to call actor() because policy parameters changed
-                        obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
-                        diffusion_logits = actor(obs_tensor)
+                    new_value = critic(
+                        torch.from_numpy(current_global_obs).unsqueeze(0).to(device)
+                    )
 
-                        # Apply the saved mask for this specific step
-                        action_mask = torch.from_numpy(all_action_masks[i]).to(device)
-                        if action_mask.shape[0] != diffusion_logits.shape[0]:
-                            # Skip if shape mismatch (rare edge case)
-                            continue
+                    # Policy loss
+                    logratio = new_logprob - b_logprobs[i]
+                    ratio = logratio.exp()
 
-                        diffusion_logits[~action_mask] = -1e9
+                    adv = advantages[i]
+                    pg_loss1 = -adv * ratio
+                    pg_loss2 = -adv * torch.clamp(
+                        ratio, 1 - CONFIG["clip_coef"], 1 + CONFIG["clip_coef"]
+                    )
+                    pg_loss = torch.max(pg_loss1, pg_loss2)
 
-                        all_possible_logits = torch.cat(
-                            [
-                                diffusion_logits.flatten(),
-                                deposition_logit_ti.unsqueeze(0),
-                                deposition_logit_o.unsqueeze(0),
-                            ]
-                        )
-                        dist = torch.distributions.Categorical(logits=all_possible_logits)
+                    # Value loss
+                    v_loss = 0.5 * ((new_value - returns[i]) ** 2).mean()
 
-                        # Find the index of the action taken in the flattened logit tensor
-                        _agent_idx, action_idx = taken_action
-                        gumbel_action_idx = _agent_idx * action_dim + action_idx
-                        new_logprob = dist.log_prob(torch.tensor(gumbel_action_idx).to(device))
-                        entropy = dist.entropy()
+                    # Total loss
+                    entropy_loss = entropy * CONFIG["ent_coef"]
+                    loss = pg_loss - entropy_loss + v_loss * CONFIG["vf_coef"]
 
-                        new_value = critic(
-                            torch.from_numpy(current_global_obs).unsqueeze(0).to(device)
-                        )
-
-                        # Policy loss
-                        logratio = new_logprob - b_logprobs[i]
-                        ratio = logratio.exp()
-
-                        adv = advantages[i]
-                        pg_loss1 = -adv * ratio
-                        pg_loss2 = -adv * torch.clamp(
-                            ratio, 1 - CONFIG["clip_coef"], 1 + CONFIG["clip_coef"]
-                        )
-                        pg_loss = torch.max(pg_loss1, pg_loss2)
-
-                        # Value loss
-                        v_loss = 0.5 * ((new_value - returns[i]) ** 2)
-
-                        # Total loss (accumulate, don't average yet)
-                        loss = pg_loss - entropy * CONFIG["ent_coef"] + v_loss * CONFIG["vf_coef"]
-
-                        # Backward pass (accumulates gradients)
-                        loss.backward()
-
-                        # Track for logging
-                        total_pg_loss += pg_loss.item()
-                        total_v_loss += v_loss.item()
-                        total_entropy += entropy.item()
-                        num_updates += 1
-
-                # Update weights once per minibatch
-                if num_updates > 0:
+                    # Optimize
+                    optimizer.zero_grad()
+                    loss.backward()
                     torch.nn.utils.clip_grad_norm_(
                         list(actor.parameters()) + list(critic.parameters()),
                         CONFIG["max_grad_norm"],
                     )
                     optimizer.step()
+
+                    # Track for logging (only last epoch)
+                    if _epoch == CONFIG["update_epochs"] - 1:
+                        total_pg_loss += pg_loss.item()
+                        total_v_loss += v_loss.item()
+                        total_entropy += entropy_loss.item()
+                        num_policy_updates += 1
 
         logger.debug("PPO update phase finished.")
 
@@ -437,10 +418,10 @@ def main() -> None:
         mean_reward = np.mean(all_rewards) if all_rewards else 0.0
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("charts/sps", sps, global_step)
-        if num_updates > 0:
-            writer.add_scalar("losses/value_loss", total_v_loss / num_updates, global_step)
-            writer.add_scalar("losses/policy_loss", total_pg_loss / num_updates, global_step)
-            writer.add_scalar("losses/entropy", total_entropy / num_updates, global_step)
+        if num_policy_updates > 0:
+            writer.add_scalar("losses/value_loss", total_v_loss / num_policy_updates, global_step)
+            writer.add_scalar("losses/policy_loss", total_pg_loss / num_policy_updates, global_step)
+            writer.add_scalar("losses/entropy", total_entropy / num_policy_updates, global_step)
         writer.add_scalar("charts/mean_reward", mean_reward, global_step)
 
         # Log failure reasons for a few steps to debug
