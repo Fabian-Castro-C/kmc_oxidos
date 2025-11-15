@@ -36,8 +36,8 @@ CONFIG = {
     "torch_seed": 42,
     "lattice_size": (5, 5, 8),
     "deposition_flux": 0.1,  # Monolayers per second, analogous to QCM
-    "total_timesteps": 10240,  # Short run for testing
-    "num_steps": 2048,  # Number of steps to run for each environment per update
+    "total_timesteps": 512,  # Short run for debugging
+    "num_steps": 128,  # Number of steps to run for each environment per update
     "learning_rate": 3e-4,
     "gamma": 0.99,
     "gae_lambda": 0.95,
@@ -289,6 +289,20 @@ def main() -> None:
             writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
         writer.add_scalar("charts/mean_reward", mean_reward, global_step)
 
+        # Log failure reasons for a few steps to debug
+        if update == 1:
+            print("\n--- Sample of Action Outcomes (Update 1) ---")
+            for i in range(min(20, len(all_obs))):  # Log first 20 steps
+                info = env.step_info[i]
+                if not info["success"]:
+                    print(
+                        f"Step {i}: Action {info['executed_action']} failed. Reason: {info['failure_reason']}"
+                    )
+                else:
+                    print(
+                        f"Step {i}: Action {info['executed_action']} succeeded. Reward: {info['reward']:.4f}"
+                    )
+
         print(
             f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}"
         )
@@ -302,9 +316,10 @@ def main() -> None:
             [],
             [],
         )
+        env.step_info.clear()  # Clear step info for next update
 
     # Save final model
-    model_path = CONFIG["save_path"] / f"{CONFIG['run_name']}_final.pt"
+    model_path = model_dir / "final_model.pt"
     torch.save(
         {"actor_state_dict": actor.state_dict(), "critic_state_dict": critic.state_dict()},
         model_path,

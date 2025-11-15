@@ -136,6 +136,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self.total_reward = 0.0
         self.episode_info: dict[str, Any] = {}
         self.prev_omega: float = 0.0  # Track grand potential for reward calculation
+        self.step_info: list[dict[str, Any]] = []
+        self.step_info: list[dict[str, Any]] = [] # Store info for logging
 
     def reset(
         self,
@@ -222,21 +224,24 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """
         agent_idx, action_idx = action
         self.step_count += 1
+        failure_reason = "Unknown"
 
         # Validate action
         if agent_idx >= len(self.agents):
             # Invalid agent index (can happen if agent list changes)
-            reward = -1.0  # Penalty for invalid action
+            reward = -0.01  # Small penalty for invalid agent
             terminated = False
             truncated = self.step_count >= self.max_steps
-            info = {"invalid_action": True, "step": self.step_count, "n_agents": len(self.agents)}
+            failure_reason = f"Agent index {agent_idx} out of bounds ({len(self.agents)} agents)."
+            info = {"failure_reason": failure_reason, "step": self.step_count, "n_agents": len(self.agents)}
             return self._get_observation(), reward, terminated, truncated, info
 
         # Get the agent and the action to perform
         agent = self.agents[agent_idx]
+        action_enum = ActionType(action_idx)
 
         # Execute the event on the lattice
-        success = self._execute_event(agent, action_idx)
+        success, failure_reason = self._execute_event(agent, action_enum)
 
         # Update agents list after lattice modification
         if success:
@@ -244,6 +249,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Calculate reward based on change in grand potential
         reward = self._calculate_reward()
+        if not success and reward == 0:
+            reward = -0.01 # Penalize actions that do nothing
         self.total_reward += reward
 
         # Check termination conditions
@@ -256,9 +263,12 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             "roughness": self._calculate_roughness(),
             "coverage": self._calculate_coverage(),
             "n_agents": len(self.agents),
-            "executed_action": (agent_idx, action_idx),
+            "executed_action": (agent_idx, str(action_enum)),
             "reward": reward,
+            "success": success,
+            "failure_reason": failure_reason,
         }
+        self.step_info.append(info)
 
         # At the end of an episode, populate final stats
         if terminated or truncated:
@@ -272,6 +282,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             })
             info.update(self.episode_info)
 
+        # Store step info for logging
+        self.step_info.append(info)
+
         observation = self._get_observation()
 
         return observation, reward, terminated, truncated, info
@@ -283,80 +296,76 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """
         self.agents = create_agents_from_lattice(self.lattice)
 
-    def _execute_event(self, agent: Any, action_idx: int) -> bool:
+    def _execute_event(self, agent: Any, action: ActionType) -> tuple[bool, str]:
         """
         Execute the selected event on the lattice.
 
         Args:
             agent: The agent performing the action.
-            action_idx: The index of the action to perform.
+            action: The action to perform.
 
         Returns:
-            True if event executed successfully, False otherwise.
+            A tuple of (success, reason).
         """
         site = agent.site
 
         # Adsorption Events
-        if action_idx == ActionType.ADSORB_TI or action_idx == ActionType.ADSORB_O:
-            species_to_adsorb = SpeciesType.TI if action_idx == ActionType.ADSORB_TI else SpeciesType.O
-            # Adsorption happens on vacant sites
+        if action in [ActionType.ADSORB_TI, ActionType.ADSORB_O]:
+            species_to_adsorb = SpeciesType.TI if action == ActionType.ADSORB_TI else SpeciesType.O
             if site.is_occupied():
-                return False
+                return False, f"Adsorption failed: Site {site.position} is already occupied by {site.species.name}."
             site.species = species_to_adsorb
-            return True
+            return True, "Adsorption successful."
 
         # Desorption Event
-        elif action_idx == ActionType.DESORB:
+        elif action == ActionType.DESORB:
             if not site.is_occupied():
-                return False
+                return False, f"Desorption failed: Site {site.position} is already vacant."
             site.species = SpeciesType.VACANT
-            return True
+            return True, "Desorption successful."
 
         # Diffusion Events
-        elif action_idx in [
+        elif action in [
             ActionType.DIFFUSE_X_POS, ActionType.DIFFUSE_X_NEG,
             ActionType.DIFFUSE_Y_POS, ActionType.DIFFUSE_Y_NEG,
             ActionType.DIFFUSE_Z_POS, ActionType.DIFFUSE_Z_NEG,
         ]:
             if not site.is_occupied():
-                return False
+                return False, f"Diffusion failed: Initial site {site.position} is vacant."
 
             x, y, z = site.position
             dx, dy, dz = 0, 0, 0
-            if action_idx == ActionType.DIFFUSE_X_POS:
+            if action == ActionType.DIFFUSE_X_POS:
                 dx = 1
-            elif action_idx == ActionType.DIFFUSE_X_NEG:
+            elif action == ActionType.DIFFUSE_X_NEG:
                 dx = -1
-            elif action_idx == ActionType.DIFFUSE_Y_POS:
+            elif action == ActionType.DIFFUSE_Y_POS:
                 dy = 1
-            elif action_idx == ActionType.DIFFUSE_Y_NEG:
+            elif action == ActionType.DIFFUSE_Y_NEG:
                 dy = -1
-            elif action_idx == ActionType.DIFFUSE_Z_POS:
+            elif action == ActionType.DIFFUSE_Z_POS:
                 dz = 1
             else:
                 dz = -1  # Z_NEG
 
             target_pos = (x + dx, y + dy, z + dz)
-
-            # Periodic boundary conditions for x and y
             nx, ny, nz = self.lattice_size
-            target_x, target_y = target_pos[0] % nx, target_pos[1] % ny
-            target_z = target_pos[2]
+            target_x, target_y, target_z = target_pos[0] % nx, target_pos[1] % ny, target_pos[2]
 
-            # Check z-boundary
             if not (0 <= target_z < nz):
-                return False
+                return False, f"Diffusion failed: Target z-coordinate {target_z} is out of bounds."
 
             target_site = self.lattice.get_site(target_x, target_y, target_z)
-            if target_site is None or target_site.is_occupied():
-                return False
+            if target_site is None:
+                return False, "Diffusion failed: Target site is None (should not happen)."
+            if target_site.is_occupied():
+                return False, f"Diffusion failed: Target site {target_site.position} is occupied by {target_site.species.name}."
 
-            # Execute diffusion
             target_site.species = site.species
             site.species = SpeciesType.VACANT
-            return True
+            return True, "Diffusion successful."
 
-        return False
+        return False, "Unknown or invalid action."
 
     def _get_observation(self) -> dict[str, Any]:
         """
