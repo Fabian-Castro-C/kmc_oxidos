@@ -86,6 +86,12 @@ def parse_args():
         default=None,
         help="Path to configuration file (Python file with CONFIG dict)",
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume training from (overrides config file)",
+    )
     return parser.parse_args()
 
 
@@ -104,6 +110,11 @@ else:
     logger.info("Using default configuration (debug mode)")
     CONFIG = DEFAULT_CONFIG.copy()
     CONFIG["results_path"] = Path("experiments/results/train")
+
+# Override checkpoint path if provided via command line
+if args.resume:
+    CONFIG["resume_from_checkpoint"] = args.resume
+    logger.info(f"Command line override: Will resume from {args.resume}")
 
 
 def main() -> None:
@@ -179,14 +190,25 @@ def main() -> None:
     logger.info(f"Actor Params: {sum(p.numel() for p in actor.parameters()):,}")
     logger.info(f"Critic Params: {sum(p.numel() for p in critic.parameters()):,}")
 
+    # --- Load checkpoint if specified ---
+    if CONFIG.get("resume_from_checkpoint") is not None:
+        checkpoint_path = CONFIG["resume_from_checkpoint"]
+        logger.info(f"Loading checkpoint from: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        actor.load_state_dict(checkpoint["actor_state_dict"])
+        critic.load_state_dict(checkpoint["critic_state_dict"])
+        episode_count = checkpoint.get("episode", 0)
+        best_mean_reward = checkpoint.get("mean_reward", float("-inf"))
+        logger.info(f"Checkpoint loaded! Resuming from episode {episode_count}, best reward: {best_mean_reward:.4f}")
+    else:
+        # Best model tracking (starting from scratch)
+        best_mean_reward = float("-inf")
+        episode_count = 0
+
     # --- PPO Training Loop ---
     global_step = 0
     start_time = time.time()
     num_updates = CONFIG["total_timesteps"] // CONFIG["num_steps"]
-
-    # Best model tracking
-    best_mean_reward = float("-inf")
-    episode_count = 0
 
     # Rollout storage
     # Note: These are lists because the number of agents varies per step

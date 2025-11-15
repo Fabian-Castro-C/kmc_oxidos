@@ -69,6 +69,11 @@ TRAINING_CONFIG = {
     "total_timesteps": 2_000_000,  # Increased for more learning on the small lattice
     # Rollout collection
     "num_steps": 2048,  # Steps per rollout (standard PPO value)
+    # --- NEW ---
+    # Path to a checkpoint to resume training from. Set to None to train from scratch.
+    # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
+    "resume_from_checkpoint": None,
+    # --- END NEW ---
     # Checkpointing
     "checkpoint_frequency": 50,  # Save checkpoint every N updates
     "keep_checkpoints": 5,  # Keep only last N checkpoints to save space
