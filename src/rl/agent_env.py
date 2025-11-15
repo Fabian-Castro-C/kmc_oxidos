@@ -259,8 +259,10 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Calculate reward based on change in grand potential
         reward = self._calculate_reward()
-        if not success and reward == 0:
-            reward = -0.01  # Penalize actions that do nothing
+        if not success:
+            # If the action was not successful, the grand potential will not have changed.
+            # We apply a small penalty to discourage the agent from choosing invalid actions.
+            reward = -0.01
         self.total_reward += reward
 
         # Check termination conditions
@@ -395,15 +397,22 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
     def _get_observation(self) -> dict[str, Any]:
         """
-        Get current observation.
+        Get current observation. Optimized to pre-allocate numpy array.
 
         Returns:
             A dictionary containing a list of agent observations and global features.
             This structure is meant for a custom training loop that can handle
             variable numbers of agents per step.
         """
-        # Collect local observations from all active agents
-        agent_observations = [agent.observe().to_vector() for agent in self.agents]
+        num_agents = len(self.agents)
+
+        # Pre-allocate numpy array for agent observations
+        # Shape: (num_agents, 58) where 58 is the observation vector size
+        agent_observations = np.zeros((num_agents, 58), dtype=np.float32)
+
+        # Populate the array
+        for i, agent in enumerate(self.agents):
+            agent_observations[i] = agent.observe().to_vector()
 
         # Global features
         global_features = np.array(

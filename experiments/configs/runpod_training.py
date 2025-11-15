@@ -27,7 +27,7 @@ ENV_CONFIG = {
     # Thin film geometry: large substrate (x,y), sufficient height (z) for growth
     # A100-40GB: (60, 60, 120) → 432,000 sites
     # A100-80GB: (80, 80, 150) → 960,000 sites (recommended)
-    "lattice_size": (10, 10, 20),  # Large substrate + enough Z for growth
+    "lattice_size": (10, 10, 20),  # Small lattice for fast training
     # Physical parameters (MUST match between training and inference)
     "temperature": 600.0,  # Kelvin - PVD typical temperature
     "deposition_flux_ti": 0.1,  # ML/s - Titanium flux
@@ -66,7 +66,7 @@ PPO_CONFIG = {
 # ============================================================================
 TRAINING_CONFIG = {
     # Total training budget
-    "total_timesteps": 2_000_000,  # 2M steps - serious training budget
+    "total_timesteps": 2_000_000,  # Increased for more learning on the small lattice
     # Rollout collection
     "num_steps": 2048,  # Steps per rollout (standard PPO value)
     "num_envs": 1,  # Number of parallel environments (can increase if memory allows)

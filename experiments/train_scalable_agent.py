@@ -103,7 +103,7 @@ def main() -> None:
     torch.manual_seed(CONFIG.get("seed", CONFIG.get("torch_seed", 42)))
     np.random.seed(CONFIG.get("seed", CONFIG.get("torch_seed", 42)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     print("=" * 80)
     print(f"Training Configuration: {CONFIG.get('project_name', 'TiO2_Training')}")
     print(f"Run Name: {CONFIG['run_name']}")
@@ -141,15 +141,15 @@ def main() -> None:
     obs_dim = env.single_agent_observation_space.shape[0]
     global_obs_dim = env.global_feature_space.shape[0]
     action_dim = N_ACTIONS
-    
+
     # Get architecture from config or use defaults
     actor_hidden = CONFIG.get("actor_hidden_dims", [256, 256])
     critic_hidden = CONFIG.get("critic_hidden_dims", [256, 256])
     actor_activation = CONFIG.get("actor_activation", "tanh")
     critic_activation = CONFIG.get("critic_activation", "tanh")
-    
+
     actor = Actor(
-        obs_dim=obs_dim, 
+        obs_dim=obs_dim,
         action_dim=action_dim,
         hidden_dims=actor_hidden,
         activation=actor_activation

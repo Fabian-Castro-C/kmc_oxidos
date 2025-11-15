@@ -44,37 +44,34 @@ class LocalObservation:
     def to_vector(self) -> npt.NDArray[np.float32]:
         """
         Convert observation to a flat vector for policy network.
-
-        Returns:
-            Flattened observation vector (one-hot encoded species + normalized height).
+        Optimized with numpy vectorization.
         """
-        # One-hot encode species (3 species: VACANT=0, Ti=1, O=2)
         n_species = 3
+        # Pre-allocate the final vector
+        vector = np.zeros(58, dtype=np.float32)
 
-        # Encode 1st neighbors (6 neighbors × 3 species = 18 dims)
-        neighbors_1st_onehot = np.zeros(6 * n_species, dtype=np.float32)
-        for i, species in enumerate(self.neighbors_1st):
-            if 0 <= species < n_species:
-                neighbors_1st_onehot[i * n_species + species] = 1.0
+        # Vectorized one-hot encoding for 1st neighbors
+        # 6 neighbors, each can be one of 3 species. Total 18 dimensions.
+        valid_neighbors_1st_mask = self.neighbors_1st < n_species
+        indices_1st = np.arange(6)[valid_neighbors_1st_mask] * n_species + self.neighbors_1st[valid_neighbors_1st_mask]
+        vector[indices_1st] = 1.0
 
-        # Encode 2nd neighbors (12 neighbors × 3 species = 36 dims)
-        neighbors_2nd_onehot = np.zeros(12 * n_species, dtype=np.float32)
-        for i, species in enumerate(self.neighbors_2nd):
-            if 0 <= species < n_species:
-                neighbors_2nd_onehot[i * n_species + species] = 1.0
+        # Vectorized one-hot encoding for 2nd neighbors
+        # 12 neighbors, each can be one of 3 species. Total 36 dimensions.
+        # Offset by 18 (size of 1st neighbors part)
+        valid_neighbors_2nd_mask = self.neighbors_2nd < n_species
+        indices_2nd = 18 + np.arange(12)[valid_neighbors_2nd_mask] * n_species + self.neighbors_2nd[valid_neighbors_2nd_mask]
+        vector[indices_2nd] = 1.0
 
-        # Encode own species (3 dims)
-        own_species_onehot = np.zeros(n_species, dtype=np.float32)
+        # One-hot encode own species
+        # Offset by 18 + 36 = 54
         if 0 <= self.own_species < n_species:
-            own_species_onehot[self.own_species] = 1.0
+            vector[54 + self.own_species] = 1.0
 
-        # Normalized height (1 dim, assuming max height ~20 layers)
-        normalized_height = np.array([self.height / 20.0], dtype=np.float32)
+        # Normalized height
+        vector[57] = self.height / 20.0
 
-        # Concatenate: 18 + 36 + 3 + 1 = 58 dims
-        return np.concatenate(
-            [neighbors_1st_onehot, neighbors_2nd_onehot, own_species_onehot, normalized_height]
-        )
+        return vector
 
 
 class ParticleAgent:
