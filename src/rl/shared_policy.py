@@ -15,9 +15,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-# Common network architecture for both Actor and Critic
-HIDDEN_DIM = 256
-N_HIDDEN_LAYERS = 5
+# Common network architecture for both Actor and Critic (defaults from SwarmThinkers paper)
+DEFAULT_HIDDEN_DIMS = [256, 256, 256, 256, 256]
 
 
 class Actor(nn.Module):
@@ -28,33 +27,58 @@ class Actor(nn.Module):
 
     Architecture (from SwarmThinkers paper):
     - Input: Local observation vector (58 dims)
-    - 5 hidden layers with 256 units each
-    - Activation: ReLU
+    - 5 hidden layers with 256 units each (configurable)
+    - Activation: ReLU or tanh (configurable)
     - Output: Action logits (10 dims)
     """
 
-    def __init__(self, obs_dim: int = 58, action_dim: int = 10) -> None:
+    def __init__(
+        self,
+        obs_dim: int = 58,
+        action_dim: int = 10,
+        hidden_dims: list[int] | None = None,
+        activation: str = "relu",
+    ) -> None:
         """
         Initialize the Actor network.
 
         Args:
             obs_dim: Dimension of the local observation vector.
             action_dim: Number of possible actions for an agent.
+            hidden_dims: List of hidden layer dimensions. If None, uses paper defaults.
+            activation: Activation function ('relu' or 'tanh').
         """
         super().__init__()
         self.obs_dim = obs_dim
         self.action_dim = action_dim
+        self.hidden_dims = hidden_dims or DEFAULT_HIDDEN_DIMS
+        self.activation = activation
 
         layers = self._build_layers(obs_dim, action_dim)
         self.network = nn.Sequential(*layers)
         self._initialize_weights()
 
+    def _get_activation(self) -> nn.Module:
+        """Get activation function."""
+        if self.activation.lower() == "relu":
+            return nn.ReLU()
+        elif self.activation.lower() == "tanh":
+            return nn.Tanh()
+        elif self.activation.lower() == "elu":
+            return nn.ELU()
+        else:
+            raise ValueError(f"Unknown activation: {self.activation}")
+
     def _build_layers(self, input_dim: int, output_dim: int) -> list[nn.Module]:
         """Construct the network layers."""
-        layers = [nn.Linear(input_dim, HIDDEN_DIM), nn.ReLU()]
-        for _ in range(N_HIDDEN_LAYERS - 1):
-            layers.extend([nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.ReLU()])
-        layers.append(nn.Linear(HIDDEN_DIM, output_dim))
+        layers = []
+        prev_dim = input_dim
+
+        for hidden_dim in self.hidden_dims:
+            layers.extend([nn.Linear(prev_dim, hidden_dim), self._get_activation()])
+            prev_dim = hidden_dim
+
+        layers.append(nn.Linear(prev_dim, output_dim))
         return layers
 
     def _initialize_weights(self) -> None:
@@ -87,31 +111,55 @@ class Critic(nn.Module):
 
     Architecture (from SwarmThinkers paper):
     - Input: Aggregated observation vector (58 dims)
-    - 5 hidden layers with 256 units each
-    - Activation: ReLU
+    - 5 hidden layers with 256 units each (configurable)
+    - Activation: ReLU or tanh (configurable)
     - Output: Single state value (1 dim)
     """
 
-    def __init__(self, obs_dim: int = 58) -> None:
+    def __init__(
+        self,
+        obs_dim: int = 58,
+        hidden_dims: list[int] | None = None,
+        activation: str = "relu",
+    ) -> None:
         """
         Initialize the Critic network.
 
         Args:
             obs_dim: Dimension of the aggregated observation vector.
+            hidden_dims: List of hidden layer dimensions. If None, uses paper defaults.
+            activation: Activation function ('relu' or 'tanh').
         """
         super().__init__()
         self.obs_dim = obs_dim
+        self.hidden_dims = hidden_dims or DEFAULT_HIDDEN_DIMS
+        self.activation = activation
 
         layers = self._build_layers(obs_dim, 1)  # Output is a single value
         self.network = nn.Sequential(*layers)
         self._initialize_weights()
 
+    def _get_activation(self) -> nn.Module:
+        """Get activation function."""
+        if self.activation.lower() == "relu":
+            return nn.ReLU()
+        elif self.activation.lower() == "tanh":
+            return nn.Tanh()
+        elif self.activation.lower() == "elu":
+            return nn.ELU()
+        else:
+            raise ValueError(f"Unknown activation: {self.activation}")
+
     def _build_layers(self, input_dim: int, output_dim: int) -> list[nn.Module]:
         """Construct the network layers."""
-        layers = [nn.Linear(input_dim, HIDDEN_DIM), nn.ReLU()]
-        for _ in range(N_HIDDEN_LAYERS - 1):
-            layers.extend([nn.Linear(HIDDEN_DIM, HIDDEN_DIM), nn.ReLU()])
-        layers.append(nn.Linear(HIDDEN_DIM, output_dim))
+        layers = []
+        prev_dim = input_dim
+
+        for hidden_dim in self.hidden_dims:
+            layers.extend([nn.Linear(prev_dim, hidden_dim), self._get_activation()])
+            prev_dim = hidden_dim
+
+        layers.append(nn.Linear(prev_dim, output_dim))
         return layers
 
     def _initialize_weights(self) -> None:
