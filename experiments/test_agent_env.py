@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.training.agent_based_env import AgentBasedTiO2Env
+from src.rl.agent_env import AgentBasedTiO2Env
 
 
 def test_environment_initialization():

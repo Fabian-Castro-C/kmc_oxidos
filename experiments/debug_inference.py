@@ -9,7 +9,7 @@ from stable_baselines3 import PPO
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.training.agent_based_env import AgentBasedTiO2Env
+from src.rl.agent_env import AgentBasedTiO2Env
 from src.rl.action_selection import select_action_gumbel_max
 
 

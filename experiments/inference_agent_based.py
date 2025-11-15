@@ -17,7 +17,7 @@ from stable_baselines3 import PPO
 
 from src.analysis.roughness import calculate_roughness
 from src.settings import settings
-from src.training.agent_based_env import AgentBasedTiO2Env
+from src.rl.agent_env import AgentBasedTiO2Env
 
 # Setup logging
 logger = settings.setup_logging()

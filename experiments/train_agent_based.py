@@ -17,7 +17,7 @@ from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 
 from src.settings import settings
-from src.training.agent_based_env import AgentBasedTiO2Env
+from src.rl.agent_env import AgentBasedTiO2Env
 
 # Setup logging
 logger = settings.setup_logging()
