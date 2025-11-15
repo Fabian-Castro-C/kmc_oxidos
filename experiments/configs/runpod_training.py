@@ -72,7 +72,7 @@ TRAINING_CONFIG = {
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
-    "resume_from_checkpoint": "experiments/results/train/runpod_1763237538/models/best_model.pt",
+    "resume_from_checkpoint": "/kmc_oxidos/experiments/results/train/runpod_1763237538/models/best_model.pt",
     # --- END NEW ---
     # Checkpointing
     "checkpoint_frequency": 50,  # Save checkpoint every N updates
