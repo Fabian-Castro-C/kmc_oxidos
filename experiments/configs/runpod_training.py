@@ -69,7 +69,7 @@ TRAINING_CONFIG = {
     "total_timesteps": 2_000_000,  # Increased for more learning on the small lattice
     # Rollout collection
     "num_steps": 2048,  # Steps per rollout (standard PPO value)
-    "num_envs": 1,  # Number of parallel environments (can increase if memory allows)
+    "num_envs": 8,  # Number of parallel environments (8x speedup expected)
     # Checkpointing
     "checkpoint_frequency": 50,  # Save checkpoint every N updates
     "keep_checkpoints": 5,  # Keep only last N checkpoints to save space

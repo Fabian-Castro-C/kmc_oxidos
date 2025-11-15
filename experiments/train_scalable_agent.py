@@ -224,7 +224,7 @@ def main() -> None:
         logger.debug("Collecting rollouts...")
         for _step in range(CONFIG["num_steps"]):
             if _step > 0 and _step % 256 == 0:
-                logger.debug(f"  Rollout step {_step}/{CONFIG['num_steps']}...")
+                logger.info(f"  Rollout step {_step}/{CONFIG['num_steps']}...")
             global_step += 1
             all_dones.append(next_done)
             all_obs.append({"agent_observations": agent_obs, "global_features": global_obs})
@@ -336,13 +336,13 @@ def main() -> None:
 
         # Optimizing the policy and value network
         for _epoch in range(CONFIG["update_epochs"]):
-            logger.debug(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
+            logger.info(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
             # This is a simplified loop that processes one agent at a time.
             # A more advanced implementation would use minibatches, but that is
             # complex with variable numbers of agents.
             for i in range(len(all_obs)):
                 if i > 0 and i % 256 == 0:
-                    logger.debug(f"    Processing batch item {i}/{len(all_obs)}...")
+                    logger.info(f"    Processing batch item {i}/{len(all_obs)}...")
                 current_agent_obs = all_obs[i]["agent_observations"]
                 current_global_obs = all_obs[i]["global_features"]
                 num_agents = len(current_agent_obs)
