@@ -9,15 +9,15 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 from stable_baselines3 import PPO
 
+from src.analysis.roughness import calculate_roughness
 from src.settings import settings
 from src.training.agent_based_env import AgentBasedTiO2Env
-from src.analysis.roughness import calculate_roughness
 
 # Setup logging
 logger = settings.setup_logging()
@@ -46,7 +46,7 @@ def run_episode(
     env: AgentBasedTiO2Env,
     deterministic: bool = True,
     render: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Run one inference episode.
 
@@ -111,7 +111,7 @@ def run_episode(
     return results
 
 
-def analyze_growth(results: Dict[str, Any], output_dir: Path) -> None:
+def analyze_growth(results: dict[str, Any], output_dir: Path) -> None:
     """
     Analyze and visualize growth results.
 
@@ -127,8 +127,10 @@ def analyze_growth(results: Dict[str, Any], output_dir: Path) -> None:
 
     # Extract height field
     height_field = lattice.get_height_profile()
-    logger.info(f"Final height stats: mean={height_field.mean():.2f}, "
-                f"max={height_field.max():.2f}, std={height_field.std():.2f}")
+    logger.info(
+        f"Final height stats: mean={height_field.mean():.2f}, "
+        f"max={height_field.max():.2f}, std={height_field.std():.2f}"
+    )
 
     # Calculate morphology metrics
     roughness = calculate_roughness(height_field)
@@ -137,16 +139,16 @@ def analyze_growth(results: Dict[str, Any], output_dir: Path) -> None:
     # Extract species counts
     composition = lattice.get_composition()
     ti_count = composition.get(1, 0)  # SpeciesType TI
-    o_count = composition.get(2, 0)   # SpeciesType O
+    o_count = composition.get(2, 0)  # SpeciesType O
     total = ti_count + o_count
     ti_fraction = ti_count / total if total > 0 else 0
     logger.info(f"Composition: Ti={ti_count} ({ti_fraction:.2%}), O={o_count}")
 
     # Plot 3D surface (simple implementation)
     fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
+    ax = fig.add_subplot(111, projection="3d")
     X, Y = np.meshgrid(range(height_field.shape[0]), range(height_field.shape[1]))
-    surf = ax.plot_surface(X.T, Y.T, height_field, cmap='viridis', alpha=0.8)
+    surf = ax.plot_surface(X.T, Y.T, height_field, cmap="viridis", alpha=0.8)
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Height")
@@ -173,8 +175,7 @@ def analyze_growth(results: Dict[str, Any], output_dir: Path) -> None:
     fig, ax = plt.subplots(figsize=(10, 6))
     rewards = results["step_rewards"]
     ax.plot(rewards, linewidth=1.5, alpha=0.7, label="Step reward")
-    ax.axhline(np.mean(rewards), color='r', linestyle='--',
-               label=f"Mean={np.mean(rewards):.3f}")
+    ax.axhline(np.mean(rewards), color="r", linestyle="--", label=f"Mean={np.mean(rewards):.3f}")
     ax.set_xlabel("Step")
     ax.set_ylabel("Reward")
     ax.set_title("Episode Reward Evolution")
@@ -198,7 +199,7 @@ def analyze_growth(results: Dict[str, Any], output_dir: Path) -> None:
 
     # Roughness
     roughness_vals = [info.get("roughness", 0) for info in step_info]
-    axes[0, 1].plot(roughness_vals, linewidth=1.5, color='orange')
+    axes[0, 1].plot(roughness_vals, linewidth=1.5, color="orange")
     axes[0, 1].set_title("Roughness Evolution")
     axes[0, 1].set_xlabel("Step")
     axes[0, 1].set_ylabel("Roughness")
@@ -207,7 +208,7 @@ def analyze_growth(results: Dict[str, Any], output_dir: Path) -> None:
     # ESS (if available)
     ess_vals = [info.get("ess", 0) for info in step_info]
     if any(ess_vals):
-        axes[1, 0].plot(ess_vals, linewidth=1.5, color='green')
+        axes[1, 0].plot(ess_vals, linewidth=1.5, color="green")
         axes[1, 0].set_title("ESS Evolution")
         axes[1, 0].set_xlabel("Step")
         axes[1, 0].set_ylabel("ESS")
@@ -215,7 +216,7 @@ def analyze_growth(results: Dict[str, Any], output_dir: Path) -> None:
 
     # Height evolution
     heights = [info.get("mean_height", 0) for info in step_info]
-    axes[1, 1].plot(heights, linewidth=1.5, color='purple')
+    axes[1, 1].plot(heights, linewidth=1.5, color="purple")
     axes[1, 1].set_title("Mean Height Evolution")
     axes[1, 1].set_xlabel("Step")
     axes[1, 1].set_ylabel("Mean Height")
@@ -279,7 +280,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("experiments/inference_results"),
+        default=Path("experiments/results/inference"),
         help="Output directory for results",
     )
     parser.add_argument(
