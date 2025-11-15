@@ -23,14 +23,17 @@ DESCRIPTION = "Production training run with SwarmThinkers architecture for TiO2 
 # ENVIRONMENT CONFIGURATION
 # ============================================================================
 ENV_CONFIG = {
-    # Lattice dimensions - larger for better generalization
-    "lattice_size": (20, 20, 30),  # Increased from (5,5,8) for realistic surface
+    # Lattice dimensions - AGGRESSIVE for A100 GPU
+    # Thin film geometry: large substrate (x,y), sufficient height (z) for growth
+    # A100-40GB: (60, 60, 120) → 432,000 sites
+    # A100-80GB: (80, 80, 150) → 960,000 sites (recommended)
+    "lattice_size": (80, 80, 150),  # Large substrate + enough Z for growth
     # Physical parameters (MUST match between training and inference)
     "temperature": 600.0,  # Kelvin - PVD typical temperature
     "deposition_flux_ti": 0.1,  # ML/s - Titanium flux
     "deposition_flux_o": 0.2,  # ML/s - Oxygen flux (higher, as typical in PVD)
     # Episode configuration
-    "max_steps_per_episode": 2000,  # Steps per episode (increased for longer trajectories)
+    "max_steps_per_episode": 3000,  # Longer episodes for larger system equilibration
     # Random seed for reproducibility
     "seed": 42,
 }
@@ -84,13 +87,13 @@ TRAINING_CONFIG = {
 # ============================================================================
 NETWORK_CONFIG = {
     # Actor (decentralized policy)
-    # Options: [128,128] (light), [256,256] (balanced), [512,256] (heavy)
-    "actor_hidden_dims": [256, 128],  # Moderate capacity - good balance speed/performance
-    "actor_activation": "tanh",  # Options: "relu", "tanh", "elu"
+    # Following SwarmThinkers paper: 5-layer MLP with constant width 256
+    "actor_hidden_dims": [256, 256, 256, 256, 256],  # Paper-validated architecture
+    "actor_activation": "relu",  # Paper uses ReLU, not tanh
     # Critic (centralized value function)
-    # Critic can be larger since it only runs during training, not inference
-    "critic_hidden_dims": [512, 256, 128],  # Narrowing architecture for efficiency
-    "critic_activation": "tanh",
+    # Paper uses same architecture for both actor and critic
+    "critic_hidden_dims": [256, 256, 256, 256, 256],  # Matching paper architecture
+    "critic_activation": "relu",  # Consistent with paper
     # Initialization
     "orthogonal_init": True,  # Orthogonal weight initialization (helps training)
     "init_scale_actor": 0.01,  # Small initial policy for exploration
