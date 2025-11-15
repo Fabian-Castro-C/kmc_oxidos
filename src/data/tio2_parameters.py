@@ -45,6 +45,10 @@ class TiO2Parameters:
         bond_energy_ti_ti: Ti-Ti bond energy (eV).
         bond_energy_o_o: O-O bond energy (eV).
 
+        # Chemical potentials (adsorption energies)
+        mu_ti: float
+        mu_o: float
+
         # Formation energies
         formation_energy_tio2: Formation energy of bulk TiO2 (eV/formula unit).
     """
@@ -81,6 +85,10 @@ class TiO2Parameters:
     bond_energy_ti_o: float = -4.5  # eV (strong ionic bond)
     bond_energy_ti_ti: float = -2.0  # eV (metallic bond)
     bond_energy_o_o: float = -1.5  # eV (weak interaction)
+
+    # Chemical potentials (adsorption energies)
+    mu_ti: float = -5.5  # eV (typical DFT value for Ti on TiO2 surface)
+    mu_o: float = -3.5   # eV (typical DFT value for O on TiO2 surface)
 
     # Formation energies
     formation_energy_tio2: float = -9.7  # eV per formula unit (from Materials Project)
