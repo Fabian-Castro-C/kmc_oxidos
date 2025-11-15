@@ -169,12 +169,25 @@ def main() -> None:
         activation=critic_activation
     ).to(device)
 
+    # Compile models for 2-3x faster GPU inference
+    if device.type == "cuda":
+        logger.info("Compiling actor and critic with torch.compile...")
+        actor = torch.compile(actor, mode="reduce-overhead")
+        critic = torch.compile(critic, mode="reduce-overhead")
+
     # Optimizer - Note: deposition_logit is NOT included here as it's a fixed parameter
     optimizer = optim.Adam(
         list(actor.parameters()) + list(critic.parameters()),
         lr=CONFIG["learning_rate"],
         eps=CONFIG["adam_eps"],
     )
+
+    # Pre-allocate GPU buffers to avoid repeated CPU→GPU transfers
+    max_agents_estimate = n_sites  # Worst case: all sites occupied
+    obs_buffer = torch.zeros(max_agents_estimate, obs_dim, device=device, dtype=torch.float32)
+    action_mask_buffer = torch.zeros(max_agents_estimate, action_dim, device=device, dtype=torch.bool)
+    global_obs_buffer = torch.zeros(1, global_obs_dim, device=device, dtype=torch.float32)
+    zero_value_buffer = torch.zeros(1, global_obs_dim, device=device, dtype=torch.float32)
 
     logger.info("Starting training...")
     logger.info(f"Device: {device}")
@@ -221,23 +234,25 @@ def main() -> None:
 
             # Centralized Critic Value
             if num_agents > 0:
-                value = critic(torch.from_numpy(global_obs).unsqueeze(0).to(device))
+                global_obs_buffer[0] = torch.from_numpy(global_obs)
+                value = critic(global_obs_buffer)
             else:
                 # If no agents, the value is estimated from a zero-vector observation
-                value = critic(torch.zeros(1, global_obs_dim).to(device))
+                value = critic(zero_value_buffer)
             all_values.append(value)
 
             # Decentralized Actor Action Selection
             with torch.no_grad():
                 if num_agents > 0:
-                    obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
-                    diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
+                    # Reuse pre-allocated buffer
+                    obs_buffer[:num_agents] = torch.from_numpy(np.array(agent_obs))
+                    diffusion_logits = actor(obs_buffer[:num_agents])  # [num_agents, num_actions]
 
                     # Get, save, and apply the action mask
                     action_mask = env.get_action_mask()
                     all_action_masks.append(action_mask)
-                    action_mask_tensor = torch.from_numpy(action_mask).to(device)
-                    diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
+                    action_mask_buffer[:num_agents] = torch.from_numpy(action_mask)
+                    diffusion_logits[~action_mask_buffer[:num_agents]] = -1e9  # Mask out invalid actions
 
                     # Flatten diffusion logits and combine with the fixed deposition logits
                     all_possible_logits = torch.cat(
@@ -290,9 +305,10 @@ def main() -> None:
         with torch.no_grad():
             # Get value of the last state
             if len(agent_obs) > 0:
-                next_value = critic(torch.from_numpy(global_obs).unsqueeze(0).to(device)).reshape(1, -1)
+                global_obs_buffer[0] = torch.from_numpy(global_obs)
+                next_value = critic(global_obs_buffer).reshape(1, -1)
             else:
-                next_value = critic(torch.zeros(1, global_obs_dim).to(device)).reshape(1, -1)
+                next_value = critic(zero_value_buffer).reshape(1, -1)
 
             advantages = torch.zeros(len(all_rewards)).to(device)
             last_gae_lam = 0
@@ -339,13 +355,13 @@ def main() -> None:
                 # We only update the policy for diffusion actions, as deposition is fixed
                 if not is_deposition and num_agents > 0:
                     # Recalculate log_probs, entropy, and values
-                    obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
-                    diffusion_logits = actor(obs_tensor)
+                    obs_buffer[:num_agents] = torch.from_numpy(np.array(current_agent_obs))
+                    diffusion_logits = actor(obs_buffer[:num_agents])
 
                     # Apply the saved mask for this specific step
-                    action_mask = torch.from_numpy(all_action_masks[i]).to(device)
-                    if action_mask.shape[0] == diffusion_logits.shape[0]:
-                        diffusion_logits[~action_mask] = -1e9
+                    action_mask_buffer[:num_agents] = torch.from_numpy(all_action_masks[i])
+                    if action_mask_buffer[:num_agents].shape[0] == diffusion_logits.shape[0]:
+                        diffusion_logits[~action_mask_buffer[:num_agents]] = -1e9
                     else:
                         # This can happen on the last step of an episode if the number of agents changes.
                         # We can skip this update as it's a minor edge case.
@@ -368,7 +384,8 @@ def main() -> None:
                     )
                     entropy = dist.entropy().mean()
 
-                    new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
+                    global_obs_buffer[0] = torch.from_numpy(current_global_obs)
+                    new_value = critic(global_obs_buffer)
 
                     # Policy loss
                     logratio = new_logprob - b_logprobs[i]
