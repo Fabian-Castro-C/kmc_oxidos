@@ -113,6 +113,7 @@ def main() -> None:
     all_rewards = []  # List of floats
     all_dones = []  # List of bools
     all_values = []  # List of tensors
+    all_action_masks = [] # List of action masks
 
     next_obs, _ = env.reset()
     agent_obs = next_obs["agent_observations"]
@@ -146,11 +147,20 @@ def main() -> None:
                 if num_agents > 0:
                     obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
                     diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
+
+                    # Get, save, and apply the action mask
+                    action_mask = env.get_action_mask()
+                    all_action_masks.append(action_mask)
+                    action_mask_tensor = torch.from_numpy(action_mask).to(device)
+                    diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
+
                     # Flatten diffusion logits and combine with the fixed deposition logit
                     all_possible_logits = torch.cat(
                         [diffusion_logits.flatten(), deposition_logit.unsqueeze(0)]
                     )
                 else:
+                    # No agents, so no diffusion actions to mask
+                    all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
                     # Only deposition is possible
                     all_possible_logits = deposition_logit.unsqueeze(0)
 
@@ -238,6 +248,16 @@ def main() -> None:
                     # Recalculate log_probs, entropy, and values
                     obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
                     diffusion_logits = actor(obs_tensor)
+
+                    # Apply the saved mask for this specific step
+                    action_mask = torch.from_numpy(all_action_masks[i]).to(device)
+                    if action_mask.shape[0] == diffusion_logits.shape[0]:
+                         diffusion_logits[~action_mask] = -1e9
+                    else:
+                        # This can happen on the last step of an episode if the number of agents changes.
+                        # We can skip this update as it's a minor edge case.
+                        continue
+
                     all_possible_logits = torch.cat(
                         [diffusion_logits.flatten(), deposition_logit.unsqueeze(0)]
                     )
@@ -308,7 +328,8 @@ def main() -> None:
         )
 
         # Clear rollout storage
-        all_obs, all_actions, all_logprobs, all_rewards, all_dones, all_values = (
+        all_obs, all_actions, all_logprobs, all_rewards, all_dones, all_values, all_action_masks = (
+            [],
             [],
             [],
             [],

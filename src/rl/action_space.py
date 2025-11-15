@@ -43,6 +43,50 @@ class ActionType(Enum):
     REACT_TIO2 = 9
 
 
+def create_action_mask(agents: list[ParticleAgent]) -> npt.NDArray[np.bool_]:
+    """
+    Creates a boolean action mask for a list of agents.
+
+    Args:
+        agents: A list of ParticleAgent instances.
+
+    Returns:
+        A boolean numpy array of shape (n_agents, N_ACTIONS), where True indicates
+        a valid action.
+    """
+    from src.kmc.lattice import SpeciesType
+
+    if not agents:
+        return np.zeros((0, N_ACTIONS), dtype=bool)
+
+    n_agents = len(agents)
+    mask = np.zeros((n_agents, N_ACTIONS), dtype=bool)
+
+    # Define valid actions for occupied and vacant sites
+    # Note: REACT_TIO2 is excluded as it's not implemented in the environment
+    occupied_actions = [
+        ActionType.DIFFUSE_X_POS.value,
+        ActionType.DIFFUSE_X_NEG.value,
+        ActionType.DIFFUSE_Y_POS.value,
+        ActionType.DIFFUSE_Y_NEG.value,
+        ActionType.DIFFUSE_Z_POS.value,
+        ActionType.DIFFUSE_Z_NEG.value,
+        ActionType.DESORB.value,
+    ]
+    vacant_actions = [
+        ActionType.ADSORB_TI.value,
+        ActionType.ADSORB_O.value,
+    ]
+
+    for i, agent in enumerate(agents):
+        if agent.site.species == SpeciesType.VACANT:
+            mask[i, vacant_actions] = True
+        else:
+            mask[i, occupied_actions] = True
+
+    return mask
+
+
 def get_action_mask(agent: ParticleAgent) -> npt.NDArray[np.bool_]:
     """
     Get boolean action mask for an agent.

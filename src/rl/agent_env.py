@@ -24,8 +24,8 @@ from gymnasium import spaces
 from src.analysis.roughness import calculate_roughness
 from src.data.tio2_parameters import TiO2Parameters
 from src.kmc.lattice import Lattice, SpeciesType
-from src.rl.action_space import N_ACTIONS, ActionType
-from src.rl.particle_agent import create_agents_from_lattice
+from src.rl.action_space import N_ACTIONS, ActionType, create_action_mask
+from src.rl.particle_agent import ParticleAgent, create_agents_from_lattice
 from src.rl.rate_calculator import ActionRateCalculator
 
 from .energy_calculator import SystemEnergyCalculator
@@ -288,6 +288,16 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         observation = self._get_observation()
 
         return observation, reward, terminated, truncated, info
+
+    def get_action_mask(self) -> np.ndarray:
+        """
+        Generates a boolean mask for all valid actions for the current agents.
+
+        Returns:
+            A numpy array of shape (n_agents, N_ACTIONS) where True indicates a
+            valid action.
+        """
+        return create_action_mask(self.agents)
 
     def _update_agents(self) -> None:
         """
