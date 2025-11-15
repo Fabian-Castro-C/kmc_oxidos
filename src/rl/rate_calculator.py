@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 class ActionRateCalculator:
     """
     Calculate physical rates for RL actions.
-    
+
     Bridges the gap between policy actions (ActionType) and physical event rates (Hz).
     Uses the existing KMC RateCalculator to ensure thermodynamic consistency.
-    
+
     Attributes:
         rate_calculator: KMC rate calculator with temperature and physical parameters
         params: TiO2 physical parameters (activation energies, attempt frequencies)
@@ -42,7 +42,7 @@ class ActionRateCalculator:
     ):
         """
         Initialize action rate calculator.
-        
+
         Args:
             temperature: System temperature in Kelvin
             deposition_rate: Deposition flux in ML/s (for adsorption rates)
@@ -62,32 +62,35 @@ class ActionRateCalculator:
     ) -> float:
         """
         Calculate physical rate for a given agent action.
-        
+
         Maps RL actions to KMC event rates:
         - DIFFUSE_* → diffusion rate (with ES barrier for step-down)
         - ADSORB_TI/O → adsorption rate (deposition-limited)
         - DESORB → desorption rate (high activation barrier)
         - REACT_TIO2 → reaction rate (Ti + 2O → TiO₂)
-        
+
         Args:
             agent: Particle agent attempting the action
             action: Action type from agent's action space
             lattice: Current lattice state
-            
+
         Returns:
             Rate in Hz (events per second). Returns 0.0 for invalid actions.
-            
+
         Note:
             This method assumes the action is valid (use agent.get_valid_actions()
             to check first). Invalid actions return 0.0 rate.
         """
-        site = lattice.get_site_by_index(agent.site_idx)
+        _site = lattice.get_site_by_index(agent.site_idx)
 
         # DIFFUSION ACTIONS (6 directions)
         if action in [
-            ActionType.DIFFUSE_X_POS, ActionType.DIFFUSE_X_NEG,
-            ActionType.DIFFUSE_Y_POS, ActionType.DIFFUSE_Y_NEG,
-            ActionType.DIFFUSE_Z_POS, ActionType.DIFFUSE_Z_NEG,
+            ActionType.DIFFUSE_X_POS,
+            ActionType.DIFFUSE_X_NEG,
+            ActionType.DIFFUSE_Y_POS,
+            ActionType.DIFFUSE_Y_NEG,
+            ActionType.DIFFUSE_Z_POS,
+            ActionType.DIFFUSE_Z_NEG,
         ]:
             return self._calculate_diffusion_rate(agent, action, lattice)
 
@@ -254,14 +257,14 @@ class ActionRateCalculator:
     ) -> list[float]:
         """
         Calculate rates for multiple agent-action pairs.
-        
+
         Efficient batch version for reweighting in SwarmCoordinator.
-        
+
         Args:
             agents: List of N particle agents
             actions: List of N corresponding actions
             lattice: Current lattice state
-            
+
         Returns:
             List of N rates in Hz
         """

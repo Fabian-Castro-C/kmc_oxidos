@@ -196,9 +196,7 @@ class SwarmCoordinator:
 
         return logits, probabilities
 
-    def _collect_observations(
-        self, agents: list[ParticleAgent]
-    ) -> npt.NDArray[np.float32]:
+    def _collect_observations(self, agents: list[ParticleAgent]) -> npt.NDArray[np.float32]:
         """
         Collect observations from all agents.
 
@@ -296,9 +294,7 @@ class SwarmCoordinator:
             action_idx = flat_idx % n_actions
             action = ActionType(action_idx)
 
-            rate = rate_calculator.calculate_action_rate(
-                agents[agent_idx], action, lattice
-            )
+            rate = rate_calculator.calculate_action_rate(agents[agent_idx], action, lattice)
             physical_rates[flat_idx] = rate
 
         # Step 6: Reweighted probabilities P(a) = π_θ(a)·Γ_a / Σ[π_θ(a')·Γ_a']
@@ -306,7 +302,7 @@ class SwarmCoordinator:
         reweighted_probs[~flat_mask] = 0.0
 
         total_weight = np.sum(reweighted_probs)
-        if total_weight == 0.0:
+        if total_weight == 0.0:  # noqa: SIM108
             # Fallback: all rates are zero (e.g., all atoms bonded)
             # Use pure policy (should rarely happen)
             reweighted_probs = policy_probs
@@ -340,10 +336,7 @@ class SwarmCoordinator:
         sum_weights = np.sum(valid_weights)
         sum_weights_sq = np.sum(valid_weights**2)
 
-        if sum_weights_sq > 0:
-            ess = (sum_weights**2) / sum_weights_sq
-        else:
-            ess = 0.0
+        ess = sum_weights ** 2 / sum_weights_sq if sum_weights_sq > 0 else 0.0
 
         # Calculate global rank
         sorted_indices = np.argsort(reweighted_probs)[::-1]
