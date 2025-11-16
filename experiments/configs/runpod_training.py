@@ -81,10 +81,10 @@ REWARD_SHAPING_CONFIG = {
     "enable_reward_shaping": True,
     # A. Exploration Bonus for DIFFUSE/DESORB actions
     # Motivation: Compensate thermodynamic penalty to allow exploration
-    # DISABLED: Causing over-exploration of DESORB, preventing film growth
+    # PERMANENTLY DISABLED: Causes catastrophic policy collapse (actor learns to desorb everything)
     "exploration_bonus_enabled": False,
-    "exploration_bonus_amount": 0.0,  # Disabled
-    "exploration_bonus_threshold": -2.0,  # Only if base_reward > this (not catastrophic)
+    "exploration_bonus_amount": 0.0,  # KEEP AT 0.0 - Do not enable
+    "exploration_bonus_threshold": 0.0,  # Not used when disabled
     # B. Deposition Logit Scaling
     # Motivation: Prevent deposition from dominating action selection at high flux
     # Without scaling: ln(10.0 * 100 sites) ≈ 6.9 >> diffusion logits (~[-5, 5])
@@ -106,7 +106,7 @@ REWARD_SHAPING_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 5e-5,  # Reduced for stable learning without catastrophic forgetting
+    "learning_rate": 1e-4,  # Reduced for stable learning without catastrophic forgetting
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -117,11 +117,11 @@ PPO_CONFIG = {
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.3,  # Entropy bonus - Keep exploration high to prevent premature convergence
+    "ent_coef": 0.05,  # Entropy bonus - Reduced from 0.3 to prevent over-exploration
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
-    "update_epochs": 2,  # Number of epochs per PPO update (increased to better utilize good experiences)
+    "update_epochs": 6,  # Number of epochs per PPO update (increased for better policy correction)
 }
 
 # ============================================================================

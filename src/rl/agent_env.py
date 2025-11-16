@@ -672,15 +672,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Reward = -ΔΩ (favor stability) - step_penalty (encourage efficiency)
         reward = -delta_omega - self._step_penalty
-        reward = -delta_omega - self._step_penalty
-
-        # --- REWARD SHAPING: Exploration Bonus ---
-        # Compensate thermodynamic penalty for DIFFUSE/DESORB to allow exploration
-        # Only apply if the unscaled reward is not catastrophically negative
-        exploration_bonus = 0.0
-        if action_was_exploration and reward > -2.0:  # Threshold before scaling
-            exploration_bonus = 0.4  # Small bonus to offset typical diffusion/desorption cost
-            reward += exploration_bonus
 
         # Scale reward to reduce variance (rewards range from ~-10 to +13 eV)
         # Scaling by 5.0 brings them to ~-2 to +2.6 range, easier for RL to learn
