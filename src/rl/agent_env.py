@@ -328,6 +328,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         deposition_occurred, deposit_species, deposit_reason = self._try_automatic_deposition()
         if deposition_occurred:
             self._action_type_history.append("DEPOSIT")
+            # Update prev_omega AFTER deposition so agent reward only reflects its action
+            self.prev_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
 
         # AGENT ACTION (policy-controlled surface dynamics)
         if action is None:
