@@ -45,16 +45,33 @@ ENV_CONFIG = {
 # ============================================================================
 FLUX_SCHEDULE_CONFIG = {
     "enable_flux_schedule": True,
-    # Progressive flux reduction to force structural refinement
-    # Phase 1: Fast deposition (learn basic bonding) - Updates 0-99
-    # Phase 2: Moderate flux (balance deposition/diffusion) - Updates 100-199
-    # Phase 3: Refinement phase (structural quality) - Updates 200-399
-    # Phase 4: Realistic experimental conditions - Updates 400+
+    # Progressive flux reduction for balanced growth + kinetics
+    # Flux values in ML/s (Monolayers per second) - physical units
+    # With Poisson: P(deposit) = 1 - exp(-λ), where λ = flux_total * n_sites * 0.01
+    # For lattice 10×10 (100 sites): λ = flux_total * 100 * 0.01 = flux_total
+    #
+    # NEW STRATEGY: Much lower flux to give agent control over surface kinetics
+    # Target: ~20-30% deposition probability, ~70-80% agent actions
+    #
+    # Phase 1 (Updates 0-99): Moderate growth regime
+    #   λ = 0.3 → P ≈ 26% → Agent gets 74% control for kinetics
+    #   ~1-2 depositions every 5-7 steps
+    #
+    # Phase 2 (Updates 100-199): Balanced regime
+    #   λ = 0.2 → P ≈ 18% → Agent gets 82% control
+    #   ~1 deposition every 5-6 steps
+    #
+    # Phase 3 (Updates 200-399): Low flux - Kinetics-dominated
+    #   λ = 0.1 → P ≈ 9.5% → Agent gets 90% control
+    #   ~1 deposition every 10 steps
+    #
+    # Phase 4 (Updates 400+): Ultra-low flux - Pure refinement
+    #   λ = 0.05 → P ≈ 4.9% → Agent gets 95% control
+    #   ~1 deposition every 20 steps
+    #
     "flux_stages": [
-        {"at_update": 0, "flux_ti": 10.0, "flux_o": 20.0},  # 10x - fast initial learning
-        {"at_update": 100, "flux_ti": 5.0, "flux_o": 10.0},  # 5x - transition phase
-        {"at_update": 200, "flux_ti": 1.0, "flux_o": 2.0},  # 1x - refinement phase
-        {"at_update": 400, "flux_ti": 0.1, "flux_o": 0.2},  # 0.1x - realistic experimental
+        {"at_update": 0, "flux_ti": 0.5, "flux_o": 1.0},     # Initial high flux for exploration
+        {"at_update": 200, "flux_ti": 0.1, "flux_o": 0.2},     # λ=0.3: P≈26%
     ],
 }
 

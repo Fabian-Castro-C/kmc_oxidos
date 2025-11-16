@@ -30,7 +30,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from src.data.tio2_parameters import TiO2Parameters
 from src.rl.action_selection import select_action_gumbel_max
-from src.rl.action_space import N_ACTIONS
+from src.rl.action_space import N_ACTIONS, ActionType
 from src.rl.agent_env import AgentBasedTiO2Env
 from src.rl.shared_policy import Actor, Critic
 
@@ -79,8 +79,8 @@ DEFAULT_CONFIG = {
     "run_name": f"run_{int(time.time())}",
     "seed": 42,
     "lattice_size": (5, 5, 8),
-    "deposition_flux_ti": 0.1,
-    "deposition_flux_o": 0.2,
+    "deposition_flux_ti": 1.0,
+    "deposition_flux_o": 2.0,
     "validation_flux_ti": 0.1,
     "validation_flux_o": 0.2,
     "total_timesteps": 512,
@@ -235,13 +235,13 @@ def main() -> None:
         actor.load_state_dict(checkpoint["actor_state_dict"])
         critic.load_state_dict(checkpoint["critic_state_dict"])
         episode_count = checkpoint.get("episode", 0)
-        best_mean_reward = checkpoint.get("mean_reward", float("-inf"))
+        best_actor_reward = checkpoint.get("mean_actor_reward", float("-inf"))
         logger.info(
-            f"Checkpoint loaded! Resuming from episode {episode_count}, best reward: {best_mean_reward:.4f}"
+            f"Checkpoint loaded! Resuming from episode {episode_count}, best actor reward: {best_actor_reward:.4f}"
         )
     else:
         # Best model tracking (starting from scratch)
-        best_mean_reward = float("-inf")
+        best_actor_reward = float("-inf")
         episode_count = 0
 
     # --- PPO Training Loop ---
@@ -249,12 +249,19 @@ def main() -> None:
     start_time = time.time()
     num_updates = CONFIG["total_timesteps"] // CONFIG["num_steps"]
 
+    # Training loop
+    obs, _ = env.reset()
+
+    # Define logging frequency: log detailed steps every N updates
+    log_every_n_updates = 10  # Log every 10 updates
+    log_window_size = 30  # Log first 30 steps of each logged update
+
     for update in range(1, num_updates + 1):
         # --- Flux Schedule: Get current flux based on schedule ---
         current_flux_ti, current_flux_o = get_flux_for_update(update, CONFIG)
 
-        # Set flux in environment for automatic deposition
-        env.set_deposition_flux(current_flux_ti, current_flux_o)
+        # Determine if this update should have detailed logging
+        should_log_this_update = (update % log_every_n_updates == 0) or (update == 1)
 
         # Determine if this is a validation update (every 5th)
         is_validation_update = update % 5 == 0
@@ -280,12 +287,34 @@ def main() -> None:
         all_diffusion_logits = []  # Cached diffusion logits to avoid recalculation
 
         next_obs, _ = env.reset()
+
         agent_obs = next_obs["agent_observations"]
         global_obs = next_obs["global_features"]
         next_done = torch.zeros(1).to(device)
 
         # --- Rollout Collection Phase ---
         logger.debug("Collecting rollouts...")
+        
+        # Calculate deposition probability for this rollout based on flux
+        # Using Poisson model: P(deposition) = 1 - exp(-λ), where λ = flux * n_sites * Δt
+        n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
+        delta_t = 0.01  # Time step (seconds)
+        lambda_ti = current_flux_ti * n_sites * delta_t
+        lambda_o = current_flux_o * n_sites * delta_t
+        lambda_total = lambda_ti + lambda_o
+        p_deposit = 1.0 - np.exp(-lambda_total)
+        
+        # Log deposition parameters at the start of each logged update
+        if should_log_this_update:
+            logger.info(f"  Deposition params: λ_Ti={lambda_ti:.3f}, λ_O={lambda_o:.3f}, λ_total={lambda_total:.3f}, P(deposit)={p_deposit:.1%}")
+            logger.info(f"  Expected: ~{int(p_deposit * CONFIG['num_steps'])} depositions, ~{int((1-p_deposit) * CONFIG['num_steps'])} agent actions per rollout")
+        
+        # Track statistics for logging
+        num_depositions_in_rollout = 0
+        num_agent_actions_in_rollout = 0
+        actor_rewards = []  # Rewards from agent actions only
+        deposition_rewards = []  # Rewards from depositions only
+        
         for _step in range(CONFIG["num_steps"]):
             if _step > 0 and _step % 256 == 0:
                 logger.info(f"  Rollout step {_step}/{CONFIG['num_steps']}...")
@@ -304,10 +333,29 @@ def main() -> None:
                 value = critic(torch.zeros(1, global_obs_dim).to(device))
             all_values.append(value)
 
-            # Decentralized Actor Action Selection (DIFFUSION/DESORPTION ONLY)
-            # Deposition now occurs automatically in env.step()
+            # Decide between DEPOSITION (external event) or AGENT ACTION
             with torch.no_grad():
-                if num_agents > 0:
+                # Roll the dice: does a deposition occur this step?
+                if np.random.random() < p_deposit:
+                    # DEPOSITION EVENT
+                    # Choose species based on relative fluxes
+                    if np.random.random() < (lambda_ti / lambda_total):
+                        action = "DEPOSIT_TI"
+                    else:
+                        action = "DEPOSIT_O"
+                    
+                    all_actions.append(action)
+                    all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
+                    all_diffusion_logits.append(np.zeros((0, action_dim), dtype=np.float32))
+                    all_logprobs.append(torch.tensor(0.0).to(device))  # No policy decision
+                    
+                    # Execute deposition
+                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    num_depositions_in_rollout += 1
+                    deposition_rewards.append(reward)
+                    
+                elif num_agents > 0:
+                    # AGENT ACTION (surface kinetics)
                     obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
                     diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
 
@@ -321,45 +369,52 @@ def main() -> None:
 
                     diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
 
-                    # Flatten diffusion logits (NO deposition logits anymore)
+                    # Flatten diffusion logits
                     all_possible_logits = diffusion_logits.flatten()
+                    
+                    # Gumbel-Max for action selection
+                    gumbel_action_idx, log_prob = select_action_gumbel_max(all_possible_logits)
+                    all_logprobs.append(log_prob)
+
+                    # Deconstruct the chosen action
+                    agent_idx = gumbel_action_idx // action_dim
+                    action_idx = gumbel_action_idx % action_dim
+                    action = (agent_idx, action_idx)
+
+                    all_actions.append(action)
+
+                    # Execute action in the environment
+                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    num_agent_actions_in_rollout += 1
+                    actor_rewards.append(reward)
                 else:
-                    # No agents: skip this step (deposition happens automatically)
+                    # No deposition AND no agents: force deposition to bootstrap
+                    action = "DEPOSIT_TI" if np.random.random() < 0.5 else "DEPOSIT_O"
+                    
+                    all_actions.append(action)
                     all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
                     all_diffusion_logits.append(np.zeros((0, action_dim), dtype=np.float32))
-                    action = None  # Will be handled by env.step()
-                    all_actions.append(action)
-                    # Use zero log_prob for no-action steps
                     all_logprobs.append(torch.tensor(0.0).to(device))
+                    
+                    # Execute forced deposition
+                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    num_depositions_in_rollout += 1
+                    deposition_rewards.append(reward)
 
-                    # Execute step with no agent action (only automatic deposition)
-                    next_obs, reward, terminated, truncated, _ = env.step(action)
-                    done = terminated or truncated
-                    all_rewards.append(reward)
-                    agent_obs = next_obs["agent_observations"]
-                    global_obs = next_obs["global_features"]
-                    next_done = torch.tensor(1.0 if done else 0.0).to(device)
-                    continue  # Skip to next step
-
-            # Gumbel-Max for action selection (only diffusion actions now)
-            gumbel_action_idx, log_prob = select_action_gumbel_max(all_possible_logits)
-            all_logprobs.append(log_prob)
-
-            # Deconstruct the chosen action (only diffusion space)
-            agent_idx = gumbel_action_idx // action_dim
-            action_idx = gumbel_action_idx % action_dim
-            action = (agent_idx, action_idx)
-
-            all_actions.append(action)
-
-            # Execute action in the environment (automatic deposition happens first)
-            next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             all_rewards.append(reward)
             agent_obs = next_obs["agent_observations"]
             global_obs = next_obs["global_features"]
             next_done = torch.tensor(1.0 if done else 0.0).to(device)
 
+        # Log rollout summary for tracked updates
+        if should_log_this_update:
+            total_steps = CONFIG["num_steps"]
+            dep_pct = 100.0 * num_depositions_in_rollout / total_steps
+            agent_pct = 100.0 * num_agent_actions_in_rollout / total_steps
+            logger.info(f"  Rollout summary: {num_depositions_in_rollout} depositions ({dep_pct:.1f}%), "
+                       f"{num_agent_actions_in_rollout} agent actions ({agent_pct:.1f}%)")
+        
         logger.debug("Rollout collection finished.")
         # --- GAE and Advantage Calculation ---
         logger.debug("Calculating GAE and advantages...")
@@ -416,13 +471,15 @@ def main() -> None:
                 # Determine which action was taken
                 taken_action = all_actions[i]
 
-                # Skip if no action was taken (no agents case)
-                if taken_action is None:
-                    continue
-
-                # We only update the policy for diffusion actions (deposition is automatic)
-                if num_agents > 0:
-                    # Recalculate log_probs, entropy, and values with current policy
+                # Always compute new value for critic training
+                new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
+                
+                # Check if this was an agent action (not deposition)
+                is_agent_action = isinstance(taken_action, tuple) and taken_action is not None
+                
+                if is_agent_action and num_agents > 0:
+                    # AGENT ACTION: Train both actor and critic
+                    # Recalculate log_probs, entropy for actor
                     obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
                     diffusion_logits = actor(obs_tensor)
 
@@ -444,8 +501,6 @@ def main() -> None:
                     new_logprob = dist.log_prob(torch.tensor(gumbel_action_idx).to(device))
                     entropy = dist.entropy().mean()
 
-                    new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
-
                     # Policy loss
                     logratio = new_logprob - b_logprobs[i]
                     ratio = logratio.exp()
@@ -460,11 +515,11 @@ def main() -> None:
                     # Value loss
                     v_loss = 0.5 * ((new_value - returns[i]) ** 2).mean()
 
-                    # Total loss
+                    # Total loss (actor + critic)
                     entropy_loss = entropy * CONFIG["ent_coef"]
                     loss = pg_loss - entropy_loss + v_loss * CONFIG["vf_coef"]
 
-                    # Optimize
+                    # Optimize both networks
                     optimizer.zero_grad()
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(
@@ -479,19 +534,43 @@ def main() -> None:
                         total_v_loss += v_loss.item()
                         total_entropy += entropy_loss.item()
                         num_policy_updates += 1
+                
+                else:
+                    # DEPOSITION or NO ACTION: Train only critic
+                    # Value loss only
+                    v_loss = 0.5 * ((new_value - returns[i]) ** 2).mean()
+
+                    # Optimize only critic
+                    optimizer.zero_grad()
+                    v_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(
+                        list(critic.parameters()),
+                        CONFIG["max_grad_norm"],
+                    )
+                    optimizer.step()
+
+                    # Track value loss for logging
+                    if _epoch == CONFIG["update_epochs"] - 1:
+                        total_v_loss += v_loss.item()
+                        # Note: num_policy_updates not incremented for deposition
 
         logger.debug("PPO update phase finished.")
 
         # Logging
         sps = int(global_step / (time.time() - start_time))
         mean_reward = np.mean(all_rewards) if all_rewards else 0.0
+        mean_actor_reward = np.mean(actor_rewards) if actor_rewards else 0.0
+        mean_deposition_reward = np.mean(deposition_rewards) if deposition_rewards else 0.0
+        
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("charts/sps", sps, global_step)
         if num_policy_updates > 0:
             writer.add_scalar("losses/value_loss", total_v_loss / num_policy_updates, global_step)
             writer.add_scalar("losses/policy_loss", total_pg_loss / num_policy_updates, global_step)
             writer.add_scalar("losses/entropy", total_entropy / num_policy_updates, global_step)
-        writer.add_scalar("charts/mean_reward", mean_reward, global_step)
+        writer.add_scalar("charts/mean_reward_total", mean_reward, global_step)
+        writer.add_scalar("charts/mean_reward_actor", mean_actor_reward, global_step)
+        writer.add_scalar("charts/mean_reward_deposition", mean_deposition_reward, global_step)
 
         # Log structural metrics if available
         structural_metrics_collected = [info for info in env.step_info if "ti_o_ratio" in info]
@@ -514,176 +593,84 @@ def main() -> None:
                 logger.info(
                     f"  Structural Metrics - Ti:O ratio: {avg_ti_o_ratio:.3f}, Avg coord: {avg_coordination:.2f}, Ti-O bonds: {avg_ti_o_fraction:.1%}"
                 )
-
-        # Log action outcomes for debugging (update 1 and every validation update)
-        if (update == 1 or (update % 5 == 0 and update <= 20)) and env.step_info:
-            logger.info("\n--- Sample of Action Outcomes (Update 1) ---")
-            total_steps = len(env.step_info)
+        
+        # --- DETAILED STEP LOGGING (AFTER PO) ---
+        # Log detailed first 30, middle 30, and last 30 steps for selected updates
+        if should_log_this_update:
+            total_steps = len(all_actions)
+            
             # First 30 steps
-            print("\n[First 30 steps]")
-            for i in range(min(30, total_steps)):
-                info = env.step_info[i]
-                action_str = (
-                    info["executed_action"]
-                    if isinstance(info["executed_action"], str)
-                    else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                )
-                if not info["success"]:
-                    print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
-                else:
-                    print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+            logger.info("\n--- First 30 Steps ---")
+            for i in range(min(log_window_size, total_steps)):
+                action = all_actions[i]
+                reward = all_rewards[i]
+                obs = all_obs[i]
+                n_agents = len(obs["agent_observations"])
+                
+                if isinstance(action, str):
+                    species_name = "Ti" if action == "DEPOSIT_TI" else "O"
+                    logger.info(
+                        f"  [{i:3d}] DEPOSIT {species_name:2s} → "
+                        f"Reward: {reward:+6.3f}, Agents: {n_agents:3d}"
+                    )
+                elif isinstance(action, tuple):
+                    agent_idx, action_idx = action
+                    action_name = ActionType(action_idx).name
+                    logger.info(
+                        f"  [{i:3d}] AGENT[{agent_idx:2d}] {action_name:14s} → "
+                        f"Reward: {reward:+6.3f}, Agents: {n_agents:3d}"
+                    )
+            
             # Middle 30 steps
             if total_steps > 60:
-                print("\n[Middle 30 steps]")
+                logger.info("\n--- Middle 30 Steps ---")
                 mid_start = (total_steps // 2) - 15
-                mid_end = mid_start + 30
-                for i in range(mid_start, min(mid_end, total_steps)):
-                    info = env.step_info[i]
-                    action_str = (
-                        info["executed_action"]
-                        if isinstance(info["executed_action"], str)
-                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                    )
-                    if not info["success"]:
-                        print(
-                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+                mid_end = min(mid_start + log_window_size, total_steps)
+                for i in range(mid_start, mid_end):
+                    action = all_actions[i]
+                    reward = all_rewards[i]
+                    obs = all_obs[i]
+                    n_agents = len(obs["agent_observations"])
+                    
+                    if isinstance(action, str):
+                        species_name = "Ti" if action == "DEPOSIT_TI" else "O"
+                        logger.info(
+                            f"  [{i:3d}] DEPOSIT {species_name:2s} → "
+                            f"Reward: {reward:+6.3f}, Agents: {n_agents:3d}"
                         )
-                    else:
-                        print(
-                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                    elif isinstance(action, tuple):
+                        agent_idx, action_idx = action
+                        action_name = ActionType(action_idx).name
+                        logger.info(
+                            f"  [{i:3d}] AGENT[{agent_idx:2d}] {action_name:14s} → "
+                            f"Reward: {reward:+6.3f}, Agents: {n_agents:3d}"
                         )
+            
             # Last 30 steps
-            if total_steps > 30:
-                print("\n[Last 30 steps]")
-                for i in range(max(0, total_steps - 30), total_steps):
-                    info = env.step_info[i]
-                    action_str = (
-                        info["executed_action"]
-                        if isinstance(info["executed_action"], str)
-                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                    )
-                    if not info["success"]:
-                        print(
-                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+            if total_steps > log_window_size:
+                logger.info("\n--- Last 30 Steps ---")
+                for i in range(max(0, total_steps - log_window_size), total_steps):
+                    action = all_actions[i]
+                    reward = all_rewards[i]
+                    obs = all_obs[i]
+                    n_agents = len(obs["agent_observations"])
+                    
+                    if isinstance(action, str):
+                        species_name = "Ti" if action == "DEPOSIT_TI" else "O"
+                        logger.info(
+                            f"  [{i:3d}] DEPOSIT {species_name:2s} → "
+                            f"Reward: {reward:+6.3f}, Agents: {n_agents:3d}"
                         )
-                    else:
-                        print(
-                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                    elif isinstance(action, tuple):
+                        agent_idx, action_idx = action
+                        action_name = ActionType(action_idx).name
+                        logger.info(
+                            f"  [{i:3d}] AGENT[{agent_idx:2d}] {action_name:14s} → "
+                            f"Reward: {reward:+6.3f}, Agents: {n_agents:3d}"
                         )
+            logger.info("")
 
-        # Log periodically to monitor behavior during training
-        if update % 3 == 0 and env.step_info:
-            print(f"\n--- Sample of Action Outcomes (Update {update}) ---")
-            total_steps = len(env.step_info)
-            # First 30 steps
-            print("\n[First 30 steps]")
-            for i in range(min(30, total_steps)):
-                info = env.step_info[i]
-                action_str = (
-                    info["executed_action"]
-                    if isinstance(info["executed_action"], str)
-                    else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                )
-                if not info["success"]:
-                    print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
-                else:
-                    print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
-            # Middle 30 steps
-            if total_steps > 60:
-                print("\n[Middle 30 steps]")
-                mid_start = (total_steps // 2) - 15
-                mid_end = mid_start + 30
-                for i in range(mid_start, min(mid_end, total_steps)):
-                    info = env.step_info[i]
-                    action_str = (
-                        info["executed_action"]
-                        if isinstance(info["executed_action"], str)
-                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                    )
-                    if not info["success"]:
-                        print(
-                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
-                        )
-                    else:
-                        print(
-                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
-                        )
-            # Last 30 steps
-            if total_steps > 30:
-                print("\n[Last 30 steps]")
-                for i in range(max(0, total_steps - 30), total_steps):
-                    info = env.step_info[i]
-                    action_str = (
-                        info["executed_action"]
-                        if isinstance(info["executed_action"], str)
-                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                    )
-                    if not info["success"]:
-                        print(
-                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
-                        )
-                    else:
-                        print(
-                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
-                        )
-
-        # Log for last update to see what's happening
-        if update == num_updates and env.step_info:
-            print(f"\n--- Sample of Action Outcomes (Update {update}) ---")
-            total_steps = len(env.step_info)
-            # First 30 steps
-            print("\n[First 30 steps]")
-            for i in range(min(30, total_steps)):
-                info = env.step_info[i]
-                action_str = (
-                    info["executed_action"]
-                    if isinstance(info["executed_action"], str)
-                    else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                )
-                if not info["success"]:
-                    print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
-                else:
-                    print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
-            # Middle 30 steps
-            if total_steps > 60:
-                print("\n[Middle 30 steps]")
-                mid_start = (total_steps // 2) - 15
-                mid_end = mid_start + 30
-                for i in range(mid_start, min(mid_end, total_steps)):
-                    info = env.step_info[i]
-                    action_str = (
-                        info["executed_action"]
-                        if isinstance(info["executed_action"], str)
-                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                    )
-                    if not info["success"]:
-                        print(
-                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
-                        )
-                    else:
-                        print(
-                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
-                        )
-            # Last 30 steps
-            if total_steps > 30:
-                print("\n[Last 30 steps]")
-                for i in range(max(0, total_steps - 30), total_steps):
-                    info = env.step_info[i]
-                    action_str = (
-                        info["executed_action"]
-                        if isinstance(info["executed_action"], str)
-                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
-                    )
-                    if not info["success"]:
-                        print(
-                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
-                        )
-                    else:
-                        print(
-                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
-                        )
-
-        print(f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}")
+        print(f"Update {update}/{num_updates} | SPS: {sps} | Actor Reward: {mean_actor_reward:.4f} | Total Reward: {mean_reward:.4f}")
 
         # Episode tracking and model saving
         episode_count += 1
@@ -697,16 +684,17 @@ def main() -> None:
                     "critic_state_dict": critic.state_dict(),
                     "episode": episode_count,
                     "mean_reward": mean_reward,
+                    "mean_actor_reward": mean_actor_reward,
                 },
                 checkpoint_path,
             )
             logger.info(
-                f"Checkpoint saved to {checkpoint_path} (Episode {episode_count}, Reward: {mean_reward:.4f})"
+                f"Checkpoint saved to {checkpoint_path} (Episode {episode_count}, Actor Reward: {mean_actor_reward:.4f})"
             )
 
-        # Track and save best model
-        if mean_reward > best_mean_reward:
-            best_mean_reward = mean_reward
+        # Track and save best model based on actor reward
+        if mean_actor_reward > best_actor_reward:
+            best_actor_reward = mean_actor_reward
             best_model_path = model_dir / "best_model.pt"
             torch.save(
                 {
@@ -714,10 +702,11 @@ def main() -> None:
                     "critic_state_dict": critic.state_dict(),
                     "episode": episode_count,
                     "mean_reward": mean_reward,
+                    "mean_actor_reward": mean_actor_reward,
                 },
                 best_model_path,
             )
-            logger.info(f"New best model saved! Episode {episode_count}, Reward: {mean_reward:.4f}")
+            logger.info(f"New best model saved! Episode {episode_count}, Actor Reward: {mean_actor_reward:.4f}")
 
         # Clear rollout storage
         (
@@ -754,7 +743,7 @@ def main() -> None:
     )
     logger.info(f"Training finished. Final model saved to {model_path}")
     logger.info(
-        f"Best model (reward: {best_mean_reward:.4f}) saved to {model_dir / 'best_model.pt'}"
+        f"Best model (actor reward: {best_actor_reward:.4f}) saved to {model_dir / 'best_model.pt'}"
     )
     env.close()
     writer.close()

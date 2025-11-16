@@ -252,172 +252,78 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self._observation_cache.clear()
         self._dirty_observations.clear()
 
-        # Store flux rates for automatic deposition
-        self.current_flux_ti = 0.1  # Default, will be overridden by training loop
-        self.current_flux_o = 0.2
-
         observation = self._get_observation()
         info = {"step": 0, "n_agents": len(self.agents)}
 
         return observation, info
 
-    def set_deposition_flux(self, flux_ti: float, flux_o: float) -> None:
-        """Set current deposition flux rates for automatic deposition."""
-        self.current_flux_ti = flux_ti
-        self.current_flux_o = flux_o
-
-    def _try_automatic_deposition(self) -> tuple[bool, str, str]:
-        """
-        Attempt automatic deposition based on flux probability.
-
-        Physical motivation: Deposition is an external event, not controlled
-        by the film. Atoms arrive according to the flux, independent of
-        surface dynamics.
-
-        Returns:
-            (deposited, species_str, reason): Whether deposition occurred,
-            what was deposited, and reason if failed
-        """
-        # Calculate deposition probabilities (events per site per step)
-        # Flux is in ML/s, we treat each step as one time unit
-        # Cache calculation: n_sites is constant for the environment
-        if not hasattr(self, "_cached_n_sites"):
-            self._cached_n_sites = self.lattice_size[0] * self.lattice_size[1]
-
-        p_deposit_ti = self.current_flux_ti * self._cached_n_sites
-        p_deposit_o = self.current_flux_o * self._cached_n_sites
-
-        # Total deposition probability
-        p_deposit_total = p_deposit_ti + p_deposit_o
-
-        # Fast path: if total probability >= 1, deposition always occurs
-        if p_deposit_total >= 1.0:
-            # Choose which species based on relative fluxes
-            if np.random.random() < (p_deposit_ti / p_deposit_total):
-                success, reason = self._execute_deposition(species=SpeciesType.TI)
-                return success, "DEPOSIT_TI", reason
-            else:
-                success, reason = self._execute_deposition(species=SpeciesType.O)
-                return success, "DEPOSIT_O", reason
-
-        # Slow path: probabilistic deposition
-        if np.random.random() < p_deposit_total:
-            # Choose which species based on relative fluxes
-            if np.random.random() < (p_deposit_ti / p_deposit_total):
-                success, reason = self._execute_deposition(species=SpeciesType.TI)
-                return success, "DEPOSIT_TI", reason
-            else:
-                success, reason = self._execute_deposition(species=SpeciesType.O)
-                return success, "DEPOSIT_O", reason
-
-        return False, "NONE", "No deposition this step"
-
     def step(self, action: tuple[int, int] | str | None) -> tuple[dict, float, bool, bool, dict]:
         """
         Execute one time step within the environment.
 
-        NEW: Deposition occurs automatically based on flux, BEFORE agent action.
-        The agent only controls diffusion/desorption of existing atoms.
-
         Args:
-            action: (agent_idx, action_idx) for agent action, or None to skip agent action
+            action: (agent_idx, action_idx) for agent action, or a string for global actions.
         """
         self.step_count += 1
+        num_depositions = 0
 
-        # AUTOMATIC DEPOSITION (external event, not controlled by agent)
-        deposition_occurred, deposit_species, deposit_reason = self._try_automatic_deposition()
+        # The training loop now decides between agent actions and deposition.
+        # The environment just executes the given action.
 
-        # If deposition occurred, this step belongs to the environment, NOT the agent
-        # Agent does not act and receives no reward
-        if deposition_occurred:
-            self._action_type_history.append("DEPOSIT")
-            # Keep action type history limited
-            if len(self._action_type_history) > 10:
-                self._action_type_history.pop(0)
-
-            # Return immediately - no agent action, no reward, just environment event
-            obs = self._get_observation()
-            reward = 0.0  # No agent action, no reward
-            terminated = False
-            truncated = self.step_count >= self.max_steps
-            info = {
-                "automatic_deposition": True,
-                "deposited_species": deposit_species,
-                "deposit_reason": deposit_reason,
-                "step": self.step_count,
-            }
-            return obs, reward, terminated, truncated, info
-
-        # NO DEPOSITION: Agent's turn to act
-        # Update baseline BEFORE agent acts (this is the pre-action state)
+        # CALCULATE BASELINE: Energy state BEFORE any action
         self.prev_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
 
-        # AGENT ACTION (policy-controlled surface dynamics)
-        if action is None:
-            # No agent action this step (e.g., no agents exist yet)
-            # This is NOT a failure - it's expected when there are no agents
-            success = True  # Changed from False
-            reason = "No agent action - none available"
+        # Execute the action passed from the training loop
+        if isinstance(action, str) and action in ["DEPOSIT_TI", "DEPOSIT_O"]:
+            # This is a global deposition action
+            species = SpeciesType.TI if action == "DEPOSIT_TI" else SpeciesType.O
+            success, reason = self._execute_deposition(species=species)
+            if success:
+                num_depositions += 1
+                self._action_type_history.append("DEPOSIT")
             action_was_exploration = False
-        else:
-            # Agent action must be a tuple (no more string deposition actions)
-            if isinstance(action, str):
-                # Legacy support: treat as no-op
+            executed_action = action
+
+        elif isinstance(action, tuple):
+            # This is an agent action
+            agent_idx, action_idx = action
+            _agent = self.agents[agent_idx] if agent_idx < len(self.agents) else None
+
+            if not _agent:
                 success = False
-                reason = f"Deposition is now automatic, not an action: {action}"
-                action_was_exploration = False
+                reason = f"Agent index {agent_idx} out of bounds."
             else:
-                agent_idx, action_idx = action
-
-                # Validate agent index
-                if agent_idx >= len(self.agents):
-                    reward = -0.1  # Penalty for invalid agent
-                    terminated = False
-                    truncated = self.step_count >= self.max_steps
-                    reason = f"Agent index {agent_idx} out of bounds ({len(self.agents)} agents)."
-                    info = {
-                        "failure_reason": reason,
-                        "step": self.step_count,
-                        "n_agents": len(self.agents),
-                        "automatic_deposition": deposition_occurred,
-                        "deposited_species": deposit_species if deposition_occurred else None,
-                    }
-                    return self._get_observation(), reward, terminated, truncated, info
-
-                _agent = self.agents[agent_idx]
-                _action_enum = ActionType(action_idx)
                 success, reason = self._execute_agent_action(agent_idx, action_idx)
 
-                # Determine if this was an exploration action
-                action_was_exploration = _action_enum in [
-                    ActionType.DESORB,
-                    ActionType.DIFFUSE_X_POS,
-                    ActionType.DIFFUSE_X_NEG,
-                    ActionType.DIFFUSE_Y_POS,
-                    ActionType.DIFFUSE_Y_NEG,
-                    ActionType.DIFFUSE_Z_POS,
-                    ActionType.DIFFUSE_Z_NEG,
-                ]
+            _action_enum = ActionType(action_idx)
+            action_was_exploration = _action_enum in [
+                ActionType.DESORB,
+                ActionType.DIFFUSE_X_POS, ActionType.DIFFUSE_X_NEG,
+                ActionType.DIFFUSE_Y_POS, ActionType.DIFFUSE_Y_NEG,
+                ActionType.DIFFUSE_Z_POS, ActionType.DIFFUSE_Z_NEG,
+            ]
+            executed_action = (_agent.site_idx if _agent else -1, _action_enum.name)
 
-        # Track action for loop detection
-        if action is not None and not isinstance(action, str):
-            agent = self.agents[agent_idx] if agent_idx < len(self.agents) else None
-            action_signature = (agent.site_idx if agent else -1, action_idx)
+            # Track action for loop detection
+            action_signature = (_agent.site_idx, action_idx)
+            self._recent_actions.append(action_signature)
+            if len(self._recent_actions) > self._action_history_size:
+                self._recent_actions.pop(0)
 
-            if success and ActionType(action_idx) == ActionType.DESORB:
+            if success and _action_enum == ActionType.DESORB:
                 self._action_type_history.append("DESORB")
             else:
                 self._action_type_history.append("OTHER")
+        else:
+            # No action or invalid action
+            success = False
+            reason = "No action provided or invalid action type"
+            action_was_exploration = False
+            executed_action = "NO_ACTION"
 
         # Keep action type history limited
         if len(self._action_type_history) > 10:
             self._action_type_history.pop(0)
-
-        # Track action signature for loop detection
-        if action is not None and not isinstance(action, str):
-            self._recent_actions.append(action_signature)
-            if len(self._recent_actions) > self._action_history_size:
-                self._recent_actions.pop(0)
 
         # Calculate reward based on change in grand potential
         reward = self._calculate_reward(action_was_exploration=action_was_exploration)
@@ -427,59 +333,35 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             reward -= self._loop_penalty
 
         if not success:
-            # If the action was not successful, the grand potential will not have changed.
-            # Apply a penalty to discourage the agent from choosing invalid actions.
-            # Higher penalty helps agent learn to avoid invalid moves faster.
-            reward = -0.1
+            reward = -0.1  # Penalty for invalid actions
         self.total_reward += reward
 
         # Check termination conditions
-        terminated = False  # Define a success condition, e.g., target thickness
+        terminated = False
         truncated = self.step_count >= self.max_steps
 
-        # --- STRUCTURAL METRICS LOGGING (no reward impact) ---
-        # Compute structural metrics every N steps for monitoring
+        # --- STRUCTURAL METRICS LOGGING ---
         structural_metrics = {}
         if self.step_count % 100 == 0 or terminated or truncated:
-            # Calculate key structural metrics
             n_ti = self._count_species(SpeciesType.TI)
             n_o = self._count_species(SpeciesType.O)
             ti_o_ratio = n_ti / (n_o / 2.0) if n_o > 0 else 0.0
-
-            # Count bonds (already computed for critic features)
-            ti_ti_bonds, ti_o_bonds, o_o_bonds = self._count_bonds()
-            total_bonds = ti_ti_bonds + ti_o_bonds + o_o_bonds
-            ti_o_fraction = ti_o_bonds / total_bonds if total_bonds > 0 else 0.0
-
-            # Average coordination from global features
+            _, ti_o_bonds, _ = self._count_bonds()
             global_features = self._get_observation()["global_features"]
-            avg_coordination = global_features[3]  # Index 3 is avg_coord in _get_observation
+            avg_coordination = global_features[8] # Index 8 is avg_coord now
 
             structural_metrics = {
                 "ti_o_ratio": ti_o_ratio,
                 "avg_coordination": avg_coordination,
-                "ti_o_bonds_fraction": ti_o_fraction,
-                "total_bonds": total_bonds,
+                "ti_o_bonds": ti_o_bonds,
             }
-
-        # Prepare info dict
-        if action is None or isinstance(action, str):
-            executed_action = "NO_AGENT_ACTION"
-        else:
-            action_name = str(ActionType(action_idx).name)
-            executed_action = (agent_idx, action_name)
 
         # Use cached values during episode, only compute at end
         if terminated or truncated:
-            # Compute final metrics once
             roughness = self._calculate_roughness_uncached()
             coverage = self._calculate_coverage_uncached()
-            self._cached_roughness = roughness
-            self._cached_coverage = coverage
         else:
-            # During episode, use dummy values (not used for training)
-            roughness = 0.0
-            coverage = 0.0
+            roughness, coverage = 0.0, 0.0
 
         info = {
             "step": self.step_count,
@@ -490,22 +372,19 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             "reward": reward,
             "success": success,
             "failure_reason": reason,
-            **structural_metrics,  # Add structural metrics if computed
+            "num_depositions": num_depositions,
+            **structural_metrics,
         }
-        self.step_info.append(info)
 
-        # At the end of an episode, populate final stats
         if terminated or truncated:
-            self.episode_info.update(
-                {
-                    "episode_length": self.step_count,
-                    "episode_reward": self.total_reward,
-                    "final_roughness": info["roughness"],
-                    "final_coverage": info["coverage"],
-                    "n_ti": self._count_species(SpeciesType.TI),
-                    "n_o": self._count_species(SpeciesType.O),
-                }
-            )
+            self.episode_info.update({
+                "episode_length": self.step_count,
+                "episode_reward": self.total_reward,
+                "final_roughness": roughness,
+                "final_coverage": coverage,
+                "n_ti": self._count_species(SpeciesType.TI),
+                "n_o": self._count_species(SpeciesType.O),
+            })
             info.update(self.episode_info)
 
         observation = self._get_observation()
