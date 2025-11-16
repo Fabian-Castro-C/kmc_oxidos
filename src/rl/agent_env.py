@@ -281,7 +281,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Calculate deposition probabilities (events per site per step)
         # Flux is in ML/s, we treat each step as one time unit
         # Cache calculation: n_sites is constant for the environment
-        if not hasattr(self, '_cached_n_sites'):
+        if not hasattr(self, "_cached_n_sites"):
             self._cached_n_sites = self.lattice_size[0] * self.lattice_size[1]
 
         p_deposit_ti = self.current_flux_ti * self._cached_n_sites
@@ -326,11 +326,31 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # AUTOMATIC DEPOSITION (external event, not controlled by agent)
         deposition_occurred, deposit_species, deposit_reason = self._try_automatic_deposition()
+
+        # If deposition occurred, this step belongs to the environment, NOT the agent
+        # Agent does not act and receives no reward
         if deposition_occurred:
             self._action_type_history.append("DEPOSIT")
-            # CRITICAL: Update baseline immediately after deposition so agent reward
-            # only reflects the agent's own action, not the external deposition
-            self.prev_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
+            # Keep action type history limited
+            if len(self._action_type_history) > 10:
+                self._action_type_history.pop(0)
+
+            # Return immediately - no agent action, no reward, just environment event
+            obs = self._get_observation()
+            reward = 0.0  # No agent action, no reward
+            terminated = False
+            truncated = self.step_count >= self.max_steps
+            info = {
+                "automatic_deposition": True,
+                "deposited_species": deposit_species,
+                "deposit_reason": deposit_reason,
+                "step": self.step_count,
+            }
+            return obs, reward, terminated, truncated, info
+
+        # NO DEPOSITION: Agent's turn to act
+        # Update baseline BEFORE agent acts (this is the pre-action state)
+        self.prev_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
 
         # AGENT ACTION (policy-controlled surface dynamics)
         if action is None:
