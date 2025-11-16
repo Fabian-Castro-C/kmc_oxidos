@@ -597,7 +597,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 self._dirty_observations.discard(site_idx)
 
         # Compute thermodynamic and structural features for the critic
-        total_energy = self.energy_calculator.calculate_total_energy(self.lattice)
+        total_energy = self.energy_calculator.calculate_system_energy(self.lattice)
         num_ti = self._species_counts[SpeciesType.TI]
         num_o = self._species_counts[SpeciesType.O]
         num_atoms = num_ti + num_o
@@ -743,8 +743,8 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             if site.species == SpeciesType.VACANT:
                 continue
 
-            # Check all neighbors
-            for neighbor_idx in self.lattice.get_neighbor_indices(i):
+            # Check all neighbors using the site's neighbors list
+            for neighbor_idx in site.neighbors:
                 # Only count each bond once (when i < neighbor_idx)
                 if neighbor_idx <= i:
                     continue
