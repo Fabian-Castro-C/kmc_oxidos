@@ -30,10 +30,10 @@ ENV_CONFIG = {
     "lattice_size": (10, 10, 50),  # Small lattice for fast training
     # Physical parameters (MUST match between training and inference)
     "temperature": 600.0,  # Kelvin - PVD typical temperature
-    "deposition_flux_ti": 1.0,  # ML/s - Titanium flux (training, realistic accelerated)
-    "deposition_flux_o": 2.0,  # ML/s - Oxygen flux (training, realistic accelerated)
-    "validation_flux_ti": 0.5,  # ML/s - Titanium flux (validation, experimental typical)
-    "validation_flux_o": 1.0,  # ML/s - Oxygen flux (validation, experimental typical)
+    "deposition_flux_ti": 10.0,  # ML/s - Titanium flux (training, realistic accelerated)
+    "deposition_flux_o": 20.0,  # ML/s - Oxygen flux (training, realistic accelerated)
+    "validation_flux_ti": 1.0,  # ML/s - Titanium flux (validation, experimental typical)
+    "validation_flux_o": 2.0,  # ML/s - Oxygen flux (validation, experimental typical)
     # Episode configuration
     "max_steps_per_episode": 3000,  # Longer episodes for larger system equilibration
     # Random seed for reproducibility
@@ -45,7 +45,7 @@ ENV_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 3e-4,  # Standard PPO learning rate for training from scratch
+    "learning_rate": 1.5e-4,  # Standard PPO learning rate for training from scratch
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -56,7 +56,7 @@ PPO_CONFIG = {
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.1,  # Entropy bonus - Reduced for exploitation after exploration phase
+    "ent_coef": 0.2,  # Entropy bonus - Reduced for exploitation after exploration phase
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
