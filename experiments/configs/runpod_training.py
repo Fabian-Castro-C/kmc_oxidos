@@ -65,8 +65,9 @@ REWARD_SHAPING_CONFIG = {
     "enable_reward_shaping": True,
     # A. Exploration Bonus for DIFFUSE/DESORB actions
     # Motivation: Compensate thermodynamic penalty to allow exploration
-    "exploration_bonus_enabled": True,
-    "exploration_bonus_amount": 0.4,  # Small bonus for non-deposition actions
+    # DISABLED: Causing over-exploration of DESORB, preventing film growth
+    "exploration_bonus_enabled": False,
+    "exploration_bonus_amount": 0.0,  # Disabled
     "exploration_bonus_threshold": -2.0,  # Only if base_reward > this (not catastrophic)
     # B. Deposition Logit Scaling
     # Motivation: Prevent deposition from dominating action selection at high flux

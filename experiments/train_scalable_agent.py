@@ -181,7 +181,6 @@ def main() -> None:
         tio2_parameters=params,
         max_steps=CONFIG.get("max_steps_per_episode", CONFIG["num_steps"]),
     )
-    n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
 
     # Store flux values for curriculum
     train_flux_ti = CONFIG["deposition_flux_ti"]
@@ -254,6 +253,9 @@ def main() -> None:
         # --- Flux Schedule: Get current flux based on schedule ---
         current_flux_ti, current_flux_o = get_flux_for_update(update, CONFIG)
 
+        # Set flux in environment for automatic deposition
+        env.set_deposition_flux(current_flux_ti, current_flux_o)
+
         # Determine if this is a validation update (every 5th)
         is_validation_update = update % 5 == 0
 
@@ -266,16 +268,10 @@ def main() -> None:
                 f"\n--- Training Update {update}/{num_updates}: Using flux Ti={current_flux_ti:.1f}, O={current_flux_o:.1f} ML/s ---"
             )
 
-        # Recalculate deposition logits for the current update
-        # Apply scaling to prevent deposition from dominating at high flux
-        deposition_scale = CONFIG.get("deposition_logit_scale", 1.0)
-        deposition_logit_ti = torch.tensor(np.log(current_flux_ti * n_sites) / deposition_scale).to(device)
-        deposition_logit_o = torch.tensor(np.log(current_flux_o * n_sites) / deposition_scale).to(device)
-
         # Reset environment and clear rollout storage for the new update
         logger.debug("Resetting environment and clearing rollout buffers for new update.")
         all_obs = []  # List of (full_obs_dict)
-        all_actions = []  # List of (agent_idx, action_idx) tuples
+        all_actions = []  # List of (agent_idx, action_idx) tuples or None
         all_logprobs = []  # List of tensors
         all_rewards = []  # List of floats
         all_dones = []  # List of bools
@@ -308,7 +304,8 @@ def main() -> None:
                 value = critic(torch.zeros(1, global_obs_dim).to(device))
             all_values.append(value)
 
-            # Decentralized Actor Action Selection
+            # Decentralized Actor Action Selection (DIFFUSION/DESORPTION ONLY)
+            # Deposition now occurs automatically in env.step()
             with torch.no_grad():
                 if num_agents > 0:
                     obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
@@ -324,51 +321,38 @@ def main() -> None:
 
                     diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
 
-                    # Adjust deposition logits based on number of competing agents
-                    # Physical motivation: More atoms = more diffusion opportunities
-                    # Deposition probability should decrease as num_agents increases
-                    agent_competition_factor = np.log(num_agents + 1)  # +1 to avoid log(0)
-                    adjusted_dep_logit_ti = deposition_logit_ti - agent_competition_factor
-                    adjusted_dep_logit_o = deposition_logit_o - agent_competition_factor
-
-                    # Flatten diffusion logits and combine with adjusted deposition logits
-                    all_possible_logits = torch.cat(
-                        [
-                            diffusion_logits.flatten(),
-                            adjusted_dep_logit_ti.unsqueeze(0),
-                            adjusted_dep_logit_o.unsqueeze(0),
-                        ]
-                    )
+                    # Flatten diffusion logits (NO deposition logits anymore)
+                    all_possible_logits = diffusion_logits.flatten()
                 else:
-                    # No agents, so no diffusion actions to mask
+                    # No agents: skip this step (deposition happens automatically)
                     all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
                     all_diffusion_logits.append(np.zeros((0, action_dim), dtype=np.float32))
-                    # Only deposition is possible
-                    all_possible_logits = torch.cat(
-                        [deposition_logit_ti.unsqueeze(0), deposition_logit_o.unsqueeze(0)]
-                    )
+                    action = None  # Will be handled by env.step()
+                    all_actions.append(action)
+                    # Use zero log_prob for no-action steps
+                    all_logprobs.append(torch.tensor(0.0).to(device))
+                    
+                    # Execute step with no agent action (only automatic deposition)
+                    next_obs, reward, terminated, truncated, _ = env.step(action)
+                    done = terminated or truncated
+                    all_rewards.append(reward)
+                    agent_obs = next_obs["agent_observations"]
+                    global_obs = next_obs["global_features"]
+                    next_done = torch.tensor(1.0 if done else 0.0).to(device)
+                    continue  # Skip to next step
 
-            # Gumbel-Max for global action selection across all possibilities
+            # Gumbel-Max for action selection (only diffusion actions now)
             gumbel_action_idx, log_prob = select_action_gumbel_max(all_possible_logits)
             all_logprobs.append(log_prob)
 
-            # Deconstruct the chosen action
-            diffusion_action_space_size = num_agents * action_dim
-            if gumbel_action_idx < diffusion_action_space_size:
-                # It's a diffusion action
-                agent_idx = gumbel_action_idx // action_dim
-                action_idx = gumbel_action_idx % action_dim
-                action = (agent_idx, action_idx)
-            elif gumbel_action_idx == diffusion_action_space_size:
-                # It's a Ti deposition action
-                action = "DEPOSIT_TI"
-            else:
-                # It's an O deposition action
-                action = "DEPOSIT_O"
+            # Deconstruct the chosen action (only diffusion space)
+            agent_idx = gumbel_action_idx // action_dim
+            action_idx = gumbel_action_idx % action_dim
+            action = (agent_idx, action_idx)
 
             all_actions.append(action)
 
-            # Execute action in the environment
+            # Execute action in the environment (automatic deposition happens first)
             next_obs, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             all_rewards.append(reward)
@@ -431,10 +415,13 @@ def main() -> None:
 
                 # Determine which action was taken
                 taken_action = all_actions[i]
-                is_deposition = isinstance(taken_action, str)
+                
+                # Skip if no action was taken (no agents case)
+                if taken_action is None:
+                    continue
 
-                # We only update the policy for diffusion actions, as deposition is fixed
-                if not is_deposition and num_agents > 0:
+                # We only update the policy for diffusion actions (deposition is automatic)
+                if num_agents > 0:
                     # Recalculate log_probs, entropy, and values with current policy
                     obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
                     diffusion_logits = actor(obs_tensor)
@@ -447,18 +434,8 @@ def main() -> None:
 
                     diffusion_logits[~action_mask] = -1e9
 
-                    # Adjust deposition logits based on number of competing agents
-                    agent_competition_factor = np.log(num_agents + 1)
-                    adjusted_dep_logit_ti = deposition_logit_ti - agent_competition_factor
-                    adjusted_dep_logit_o = deposition_logit_o - agent_competition_factor
-
-                    all_possible_logits = torch.cat(
-                        [
-                            diffusion_logits.flatten(),
-                            adjusted_dep_logit_ti.unsqueeze(0),
-                            adjusted_dep_logit_o.unsqueeze(0),
-                        ]
-                    )
+                    # Only diffusion logits now (no deposition)
+                    all_possible_logits = diffusion_logits.flatten()
                     dist = torch.distributions.Categorical(logits=all_possible_logits)
 
                     # Find the index of the action taken in the flattened logit tensor
