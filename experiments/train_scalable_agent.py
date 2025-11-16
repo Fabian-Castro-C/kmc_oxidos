@@ -449,7 +449,10 @@ def main() -> None:
         # Log failure reasons for a few steps to debug
         if update == 1 and env.step_info:
             logger.info("\n--- Sample of Action Outcomes (Update 1) ---")
-            for i in range(min(20, len(env.step_info))):  # Log first 20 steps
+            total_steps = len(env.step_info)
+            # First 30 steps
+            print("\n[First 30 steps]")
+            for i in range(min(30, total_steps)):
                 info = env.step_info[i]
                 action_str = (
                     info["executed_action"]
@@ -460,11 +463,92 @@ def main() -> None:
                     print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
                 else:
                     print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+            # Middle 30 steps
+            if total_steps > 60:
+                print("\n[Middle 30 steps]")
+                mid_start = (total_steps // 2) - 15
+                mid_end = mid_start + 30
+                for i in range(mid_start, min(mid_end, total_steps)):
+                    info = env.step_info[i]
+                    action_str = (
+                        info["executed_action"]
+                        if isinstance(info["executed_action"], str)
+                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                    )
+                    if not info["success"]:
+                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                    else:
+                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+            # Last 30 steps
+            if total_steps > 30:
+                print("\n[Last 30 steps]")
+                for i in range(max(0, total_steps - 30), total_steps):
+                    info = env.step_info[i]
+                    action_str = (
+                        info["executed_action"]
+                        if isinstance(info["executed_action"], str)
+                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                    )
+                    if not info["success"]:
+                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                    else:
+                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+
+        # Log periodically to monitor behavior during training
+        if update % 3 == 0 and env.step_info:
+            print(f"\n--- Sample of Action Outcomes (Update {update}) ---")
+            total_steps = len(env.step_info)
+            # First 30 steps
+            print("\n[First 30 steps]")
+            for i in range(min(30, total_steps)):
+                info = env.step_info[i]
+                action_str = (
+                    info["executed_action"]
+                    if isinstance(info["executed_action"], str)
+                    else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                )
+                if not info["success"]:
+                    print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                else:
+                    print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+            # Middle 30 steps
+            if total_steps > 60:
+                print("\n[Middle 30 steps]")
+                mid_start = (total_steps // 2) - 15
+                mid_end = mid_start + 30
+                for i in range(mid_start, min(mid_end, total_steps)):
+                    info = env.step_info[i]
+                    action_str = (
+                        info["executed_action"]
+                        if isinstance(info["executed_action"], str)
+                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                    )
+                    if not info["success"]:
+                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                    else:
+                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+            # Last 30 steps
+            if total_steps > 30:
+                print("\n[Last 30 steps]")
+                for i in range(max(0, total_steps - 30), total_steps):
+                    info = env.step_info[i]
+                    action_str = (
+                        info["executed_action"]
+                        if isinstance(info["executed_action"], str)
+                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                    )
+                    if not info["success"]:
+                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                    else:
+                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
 
         # Log for last update to see what's happening
         if update == num_updates and env.step_info:
             print(f"\n--- Sample of Action Outcomes (Update {update}) ---")
-            for i in range(min(20, len(env.step_info))):  # Log first 20 steps
+            total_steps = len(env.step_info)
+            # First 30 steps
+            print("\n[First 30 steps]")
+            for i in range(min(30, total_steps)):
                 info = env.step_info[i]
                 action_str = (
                     info["executed_action"]
@@ -475,6 +559,36 @@ def main() -> None:
                     print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
                 else:
                     print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+            # Middle 30 steps
+            if total_steps > 60:
+                print("\n[Middle 30 steps]")
+                mid_start = (total_steps // 2) - 15
+                mid_end = mid_start + 30
+                for i in range(mid_start, min(mid_end, total_steps)):
+                    info = env.step_info[i]
+                    action_str = (
+                        info["executed_action"]
+                        if isinstance(info["executed_action"], str)
+                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                    )
+                    if not info["success"]:
+                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                    else:
+                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+            # Last 30 steps
+            if total_steps > 30:
+                print("\n[Last 30 steps]")
+                for i in range(max(0, total_steps - 30), total_steps):
+                    info = env.step_info[i]
+                    action_str = (
+                        info["executed_action"]
+                        if isinstance(info["executed_action"], str)
+                        else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
+                    )
+                    if not info["success"]:
+                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                    else:
+                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
 
         print(f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}")
 
