@@ -43,7 +43,7 @@ ENV_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 1e-5,  # Reduced for fine-tuning (was 1e-4)
+    "learning_rate": 3e-4,  # Standard PPO learning rate for training from scratch
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -54,7 +54,7 @@ PPO_CONFIG = {
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.05,  # Entropy bonus - INCREASED for exploration to escape local optima
+    "ent_coef": 0.2,  # Entropy bonus - AGGRESSIVE exploration to escape deposit-desorb loop
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
@@ -72,7 +72,7 @@ TRAINING_CONFIG = {
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
-    "resume_from_checkpoint": "/kmc_oxidos/experiments/results/train/runpod_1763237538/models/best_model.pt",
+    "resume_from_checkpoint": None,  # Training from scratch with aggressive exploration
     # --- END NEW ---
     # Checkpointing
     "checkpoint_frequency": 50,  # Save checkpoint every N updates
