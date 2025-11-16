@@ -54,7 +54,7 @@ PPO_CONFIG = {
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.2,  # Entropy bonus - AGGRESSIVE exploration to escape deposit-desorb loop
+    "ent_coef": 0.3,  # Entropy bonus - VERY AGGRESSIVE exploration to maintain diversity longer
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability

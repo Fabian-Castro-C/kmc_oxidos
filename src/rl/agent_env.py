@@ -609,7 +609,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         results in a positive reward.
 
         Returns:
-            Reward r_t = -ΔΩ (eV)
+            Reward r_t = -ΔΩ (eV), scaled to reduce variance
         """
         # Calculate current grand potential
         current_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
@@ -619,6 +619,10 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Reward = -ΔΩ (favor stability) - step_penalty (encourage efficiency)
         reward = -delta_omega - self._step_penalty
+
+        # Scale reward to reduce variance (rewards range from ~-10 to +13 eV)
+        # Scaling by 5.0 brings them to ~-2 to +2.6 range, easier for RL to learn
+        reward = reward / 5.0
 
         # Update previous grand potential for next step
         self.prev_omega = current_omega
