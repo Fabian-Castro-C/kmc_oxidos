@@ -67,16 +67,17 @@ class SystemEnergyCalculator:
 
     def calculate_local_energy(self, lattice: Lattice, site_idx: int) -> float:
         """
-        Calculate LOCAL energy of a site (bonds with neighbors only).
+        Calculate LOCAL energy of a site (bonds with neighbors + substrate interaction).
 
         For open system, we care about LOCAL energy changes, not global.
+        Atoms at z=0 (in contact with substrate) receive additional stabilization.
 
         Args:
             lattice: Current lattice
             site_idx: Index of site to calculate energy for
 
         Returns:
-            Local energy (sum of bonds to neighbors) in eV
+            Local energy (sum of bonds to neighbors + substrate adsorption) in eV
         """
         if site_idx >= len(lattice.sites):
             return 0.0
@@ -103,6 +104,13 @@ class SystemEnergyCalculator:
             if bond_type in self.bond_energies:
                 # Divide by 2 to avoid double-counting (each bond shared by 2 sites)
                 local_energy += self.bond_energies[bond_type] / 2.0
+
+        # Add substrate adsorption energy for atoms at z=0 (substrate layer)
+        if site.position[2] == 0:
+            if species_i == SpeciesType.TI:
+                local_energy += self.params.substrate_ads_ti
+            elif species_i == SpeciesType.O:
+                local_energy += self.params.substrate_ads_o
 
         return local_energy
 

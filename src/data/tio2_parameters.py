@@ -90,6 +90,11 @@ class TiO2Parameters:
     mu_ti: float = -5.5  # eV (typical DFT value for Ti on TiO2 surface)
     mu_o: float = -3.5   # eV (typical DFT value for O on TiO2 surface)
 
+    # Substrate adsorption energies (for atoms in contact with substrate at z=0)
+    # Using SiO2 amorphous substrate for Volmer-Weber (3D island) growth
+    substrate_ads_ti: float = -2.0  # eV (Ti on SiO2, weak interaction)
+    substrate_ads_o: float = -1.8   # eV (O on SiO2, weak interaction)
+
     # Formation energies
     formation_energy_tio2: float = -9.7  # eV per formula unit (from Materials Project)
 
