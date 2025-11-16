@@ -50,6 +50,8 @@ DEFAULT_CONFIG = {
     "lattice_size": (5, 5, 8),
     "deposition_flux_ti": 0.1,
     "deposition_flux_o": 0.2,
+    "validation_flux_ti": 0.1,
+    "validation_flux_o": 0.2,
     "total_timesteps": 512,
     "num_steps": 128,
     "learning_rate": 3e-4,
@@ -141,7 +143,7 @@ def main() -> None:
 
     writer = SummaryWriter(str(log_dir))
 
-    # Environment & Deposition Logit
+    # Environment setup
     params = TiO2Parameters()
     env = AgentBasedTiO2Env(
         lattice_size=CONFIG["lattice_size"],
@@ -149,8 +151,12 @@ def main() -> None:
         max_steps=CONFIG.get("max_steps_per_episode", CONFIG["num_steps"]),
     )
     n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
-    deposition_logit_ti = torch.tensor(np.log(CONFIG["deposition_flux_ti"] * n_sites)).to(device)
-    deposition_logit_o = torch.tensor(np.log(CONFIG["deposition_flux_o"] * n_sites)).to(device)
+    
+    # Store flux values for curriculum
+    train_flux_ti = CONFIG["deposition_flux_ti"]
+    train_flux_o = CONFIG["deposition_flux_o"]
+    validation_flux_ti = CONFIG.get("validation_flux_ti", train_flux_ti / 100.0)
+    validation_flux_o = CONFIG.get("validation_flux_o", train_flux_o / 100.0)
 
     # Actor-Critic Models
     # The Actor acts on local observations, Critic on global features
@@ -183,10 +189,11 @@ def main() -> None:
 
     logger.info("Starting training...")
     logger.info(f"Device: {device}")
-    logger.info(f"Deposition Flux (Ti): {CONFIG['deposition_flux_ti']} ML/s")
-    logger.info(f"Deposition Flux (O): {CONFIG['deposition_flux_o']} ML/s")
-    logger.info(f"Calculated Deposition Logit (Ti): {deposition_logit_ti.item():.4f}")
-    logger.info(f"Calculated Deposition Logit (O): {deposition_logit_o.item():.4f}")
+    logger.info(f"Training Flux (Ti): {train_flux_ti} ML/s (100x)")
+    logger.info(f"Training Flux (O): {train_flux_o} ML/s (100x)")
+    logger.info(f"Validation Flux (Ti): {validation_flux_ti} ML/s (1x)")
+    logger.info(f"Validation Flux (O): {validation_flux_o} ML/s (1x)")
+    logger.info(f"Curriculum: Training flux for 4/5 updates, validation flux for 1/5 updates")
     logger.info(f"Actor Params: {sum(p.numel() for p in actor.parameters()):,}")
     logger.info(f"Critic Params: {sum(p.numel() for p in critic.parameters()):,}")
 
@@ -210,24 +217,40 @@ def main() -> None:
     start_time = time.time()
     num_updates = CONFIG["total_timesteps"] // CONFIG["num_steps"]
 
-    # Rollout storage
-    # Note: These are lists because the number of agents varies per step
-    all_obs = []  # List of (full_obs_dict)
-    all_actions = []  # List of (agent_idx, action_idx) tuples
-    all_logprobs = []  # List of tensors
-    all_rewards = []  # List of floats
-    all_dones = []  # List of bools
-    all_values = []  # List of tensors
-    all_action_masks = []  # List of action masks
-    all_diffusion_logits = []  # Cached diffusion logits to avoid recalculation
-
-    next_obs, _ = env.reset()
-    agent_obs = next_obs["agent_observations"]
-    global_obs = next_obs["global_features"]
-    next_done = torch.zeros(1).to(device)
-
     for update in range(1, num_updates + 1):
-        logger.info(f"\n--- Starting Update {update}/{num_updates} ---")
+        # --- Curriculum and Reset Logic ---
+        # Determine if this is a validation update (1x flux) or training update (100x flux)
+        is_validation_update = (update % 5 == 0)
+        
+        if is_validation_update:
+            logger.info(f"\n--- Validation Update {update}/{num_updates}: Using 1x deposition flux ---")
+            current_flux_ti = validation_flux_ti
+            current_flux_o = validation_flux_o
+        else:
+            logger.info(f"\n--- Training Update {update}/{num_updates}: Using 100x deposition flux ---")
+            current_flux_ti = train_flux_ti
+            current_flux_o = train_flux_o
+
+        # Recalculate deposition logits for the current update
+        deposition_logit_ti = torch.tensor(np.log(current_flux_ti * n_sites)).to(device)
+        deposition_logit_o = torch.tensor(np.log(current_flux_o * n_sites)).to(device)
+        
+        # Reset environment and clear rollout storage for the new update
+        logger.debug("Resetting environment and clearing rollout buffers for new update.")
+        all_obs = []  # List of (full_obs_dict)
+        all_actions = []  # List of (agent_idx, action_idx) tuples
+        all_logprobs = []  # List of tensors
+        all_rewards = []  # List of floats
+        all_dones = []  # List of bools
+        all_values = []  # List of tensors
+        all_action_masks = []  # List of action masks
+        all_diffusion_logits = []  # Cached diffusion logits to avoid recalculation
+
+        next_obs, _ = env.reset()
+        agent_obs = next_obs["agent_observations"]
+        global_obs = next_obs["global_features"]
+        next_done = torch.zeros(1).to(device)
+
         # --- Rollout Collection Phase ---
         logger.debug("Collecting rollouts...")
         for _step in range(CONFIG["num_steps"]):
