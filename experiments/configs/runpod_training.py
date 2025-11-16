@@ -30,8 +30,8 @@ ENV_CONFIG = {
     "lattice_size": (10, 10, 20),  # Small lattice for fast training
     # Physical parameters (MUST match between training and inference)
     "temperature": 600.0,  # Kelvin - PVD typical temperature
-    "deposition_flux_ti": 0.1,  # ML/s - Titanium flux
-    "deposition_flux_o": 0.2,  # ML/s - Oxygen flux (higher, as typical in PVD)
+    "deposition_flux_ti": 1.0,  # ML/s - Titanium flux (10x to force island formation)
+    "deposition_flux_o": 2.0,  # ML/s - Oxygen flux (10x to force island formation)
     # Episode configuration
     "max_steps_per_episode": 3000,  # Longer episodes for larger system equilibration
     # Random seed for reproducibility
