@@ -46,14 +46,15 @@ ENV_CONFIG = {
 FLUX_SCHEDULE_CONFIG = {
     "enable_flux_schedule": True,
     # Progressive flux reduction to force structural refinement
-    # Phase 1: Fast deposition (learn basic bonding)
-    # Phase 2: Moderate flux (balance deposition/diffusion)
-    # Phase 3: Realistic flux (learn full dynamics)
+    # Phase 1: Fast deposition (learn basic bonding) - Updates 0-99
+    # Phase 2: Moderate flux (balance deposition/diffusion) - Updates 100-199
+    # Phase 3: Refinement phase (structural quality) - Updates 200-399
+    # Phase 4: Realistic experimental conditions - Updates 400+
     "flux_stages": [
         {"at_update": 0, "flux_ti": 10.0, "flux_o": 20.0},  # 10x - fast initial learning
-        {"at_update": 10, "flux_ti": 5.0, "flux_o": 10.0},  # 5x - transition phase
-        {"at_update": 20, "flux_ti": 1.0, "flux_o": 2.0},  # 1x - refinement phase
-        {"at_update": 100, "flux_ti": 0.1, "flux_o": 0.2},  # 0.1x - realistic experimental
+        {"at_update": 100, "flux_ti": 5.0, "flux_o": 10.0},  # 5x - transition phase
+        {"at_update": 200, "flux_ti": 1.0, "flux_o": 2.0},  # 1x - refinement phase
+        {"at_update": 400, "flux_ti": 0.1, "flux_o": 0.2},  # 0.1x - realistic experimental
     ],
 }
 
@@ -67,6 +68,11 @@ REWARD_SHAPING_CONFIG = {
     "exploration_bonus_enabled": True,
     "exploration_bonus_amount": 0.4,  # Small bonus for non-deposition actions
     "exploration_bonus_threshold": -2.0,  # Only if base_reward > this (not catastrophic)
+    # B. Deposition Logit Scaling
+    # Motivation: Prevent deposition from dominating action selection at high flux
+    # Without scaling: ln(10.0 * 100 sites) ≈ 6.9 >> diffusion logits (~[-5, 5])
+    # With scaling (e.g., 2.5): 6.9 / 2.5 ≈ 2.8 (more balanced competition)
+    "deposition_logit_scale": 2.5,  # Divide deposition logit by this factor
     # Structural metrics logging (NO reward impact, just monitoring)
     "log_structural_metrics": True,
     "structural_metrics": [

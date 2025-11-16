@@ -267,8 +267,10 @@ def main() -> None:
             )
 
         # Recalculate deposition logits for the current update
-        deposition_logit_ti = torch.tensor(np.log(current_flux_ti * n_sites)).to(device)
-        deposition_logit_o = torch.tensor(np.log(current_flux_o * n_sites)).to(device)
+        # Apply scaling to prevent deposition from dominating at high flux
+        deposition_scale = CONFIG.get("deposition_logit_scale", 1.0)
+        deposition_logit_ti = torch.tensor(np.log(current_flux_ti * n_sites) / deposition_scale).to(device)
+        deposition_logit_o = torch.tensor(np.log(current_flux_o * n_sites) / deposition_scale).to(device)
 
         # Reset environment and clear rollout storage for the new update
         logger.debug("Resetting environment and clearing rollout buffers for new update.")
@@ -322,12 +324,19 @@ def main() -> None:
 
                     diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
 
-                    # Flatten diffusion logits and combine with the fixed deposition logits
+                    # Adjust deposition logits based on number of competing agents
+                    # Physical motivation: More atoms = more diffusion opportunities
+                    # Deposition probability should decrease as num_agents increases
+                    agent_competition_factor = np.log(num_agents + 1)  # +1 to avoid log(0)
+                    adjusted_dep_logit_ti = deposition_logit_ti - agent_competition_factor
+                    adjusted_dep_logit_o = deposition_logit_o - agent_competition_factor
+
+                    # Flatten diffusion logits and combine with adjusted deposition logits
                     all_possible_logits = torch.cat(
                         [
                             diffusion_logits.flatten(),
-                            deposition_logit_ti.unsqueeze(0),
-                            deposition_logit_o.unsqueeze(0),
+                            adjusted_dep_logit_ti.unsqueeze(0),
+                            adjusted_dep_logit_o.unsqueeze(0),
                         ]
                     )
                 else:
@@ -438,11 +447,16 @@ def main() -> None:
 
                     diffusion_logits[~action_mask] = -1e9
 
+                    # Adjust deposition logits based on number of competing agents
+                    agent_competition_factor = np.log(num_agents + 1)
+                    adjusted_dep_logit_ti = deposition_logit_ti - agent_competition_factor
+                    adjusted_dep_logit_o = deposition_logit_o - agent_competition_factor
+
                     all_possible_logits = torch.cat(
                         [
                             diffusion_logits.flatten(),
-                            deposition_logit_ti.unsqueeze(0),
-                            deposition_logit_o.unsqueeze(0),
+                            adjusted_dep_logit_ti.unsqueeze(0),
+                            adjusted_dep_logit_o.unsqueeze(0),
                         ]
                     )
                     dist = torch.distributions.Categorical(logits=all_possible_logits)
