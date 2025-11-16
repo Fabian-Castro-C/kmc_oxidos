@@ -160,6 +160,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self._action_history_size = 10  # Track last 10 actions
         self._loop_penalty = 1.0  # Penalty for detected loops
         self._step_penalty = 0.005  # Small penalty per step to encourage efficiency
+        self._action_type_history: list[str] = []  # Track action types for DEPOSIT->DESORB detection
 
         # Observation caching: cache agent observations to avoid recomputation
         self._observation_cache: dict[
@@ -243,6 +244,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Clear action history for loop detection
         self._recent_actions = []
+        self._action_type_history = []
 
         # Clear observation cache
         self._observation_cache.clear()
@@ -296,10 +298,20 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Track action for loop detection
         if is_deposition_action:
             action_signature = ("DEPOSIT", action)
+            self._action_type_history.append("DEPOSIT")
         else:
             # Track (agent_site, action_type) to detect position-action loops
             agent = self.agents[agent_idx] if agent_idx < len(self.agents) else None
             action_signature = (agent.site_idx if agent else -1, action_idx)
+            # Track if this is a DESORB action
+            if success and ActionType(action_idx) == ActionType.DESORB:
+                self._action_type_history.append("DESORB")
+            else:
+                self._action_type_history.append("OTHER")
+
+        # Keep action type history limited
+        if len(self._action_type_history) > 10:
+            self._action_type_history.pop(0)
 
         self._recent_actions.append(action_signature)
         if len(self._recent_actions) > self._action_history_size:
@@ -623,6 +635,11 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Scale reward to reduce variance (rewards range from ~-10 to +13 eV)
         # Scaling by 5.0 brings them to ~-2 to +2.6 range, easier for RL to learn
         reward = reward / 5.0
+
+        # Anti-repetition penalty: discourage immediate DEPOSIT→DESORB cycles
+        # This is reward shaping, NOT physics violation - thermodynamics still intact
+        if len(self._action_type_history) >= 2 and (self._action_type_history[-2] == "DEPOSIT" and self._action_type_history[-1] == "DESORB"):
+            reward -= 0.1  # Scaled penalty to match scaled rewards
 
         # Update previous grand potential for next step
         self.prev_omega = current_omega

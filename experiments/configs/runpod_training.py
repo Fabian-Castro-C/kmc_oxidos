@@ -54,11 +54,11 @@ PPO_CONFIG = {
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.3,  # Entropy bonus - VERY AGGRESSIVE exploration to maintain diversity longer
+    "ent_coef": 0.5,  # Entropy bonus - EXTREME exploration to prevent premature convergence to DEPOSIT→DESORB cycle
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
-    "update_epochs": 3,  # Number of epochs per PPO update (reduced for speed with variable agents)
+    "update_epochs": 2,  # Number of epochs per PPO update (reduced to prevent entropy collapse)
 }
 
 # ============================================================================
