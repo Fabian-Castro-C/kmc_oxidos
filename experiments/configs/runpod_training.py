@@ -30,8 +30,8 @@ ENV_CONFIG = {
     "lattice_size": (10, 10, 50),  # Small lattice for fast training
     # Physical parameters (MUST match between training and inference)
     "temperature": 600.0,  # Kelvin - PVD typical temperature
-    "deposition_flux_ti": 10.0,  # ML/s - Titanium flux (training, realistic accelerated)
-    "deposition_flux_o": 20.0,  # ML/s - Oxygen flux (training, realistic accelerated)
+    "deposition_flux_ti": 10.0,  # ML/s - Titanium flux (training, AGGRESSIVE curriculum)
+    "deposition_flux_o": 20.0,  # ML/s - Oxygen flux (training, AGGRESSIVE curriculum)
     "validation_flux_ti": 1.0,  # ML/s - Titanium flux (validation, experimental typical)
     "validation_flux_o": 2.0,  # ML/s - Oxygen flux (validation, experimental typical)
     # Episode configuration
@@ -45,7 +45,7 @@ ENV_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 1.5e-4,  # Standard PPO learning rate for training from scratch
+    "learning_rate": 5e-5,  # Reduced for stable learning without catastrophic forgetting
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -56,11 +56,11 @@ PPO_CONFIG = {
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.2,  # Entropy bonus - Reduced for exploitation after exploration phase
+    "ent_coef": 0.3,  # Entropy bonus - Keep exploration high to prevent premature convergence
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
-    "update_epochs": 2,  # Number of epochs per PPO update (reduced to prevent entropy collapse)
+    "update_epochs": 3,  # Number of epochs per PPO update (increased to better utilize good experiences)
 }
 
 # ============================================================================

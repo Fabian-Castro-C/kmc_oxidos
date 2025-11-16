@@ -151,7 +151,7 @@ def main() -> None:
         max_steps=CONFIG.get("max_steps_per_episode", CONFIG["num_steps"]),
     )
     n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
-    
+
     # Store flux values for curriculum
     train_flux_ti = CONFIG["deposition_flux_ti"]
     train_flux_o = CONFIG["deposition_flux_o"]
@@ -193,7 +193,7 @@ def main() -> None:
     logger.info(f"Training Flux (O): {train_flux_o} ML/s (100x)")
     logger.info(f"Validation Flux (Ti): {validation_flux_ti} ML/s (1x)")
     logger.info(f"Validation Flux (O): {validation_flux_o} ML/s (1x)")
-    logger.info(f"Curriculum: Training flux for 4/5 updates, validation flux for 1/5 updates")
+    logger.info("Curriculum: Training flux for 4/5 updates, validation flux for 1/5 updates")
     logger.info(f"Actor Params: {sum(p.numel() for p in actor.parameters()):,}")
     logger.info(f"Critic Params: {sum(p.numel() for p in critic.parameters()):,}")
 
@@ -221,7 +221,7 @@ def main() -> None:
         # --- Curriculum and Reset Logic ---
         # Determine if this is a validation update (1x flux) or training update (100x flux)
         is_validation_update = (update % 5 == 0)
-        
+
         if is_validation_update:
             logger.info(f"\n--- Validation Update {update}/{num_updates}: Using 1x deposition flux ---")
             current_flux_ti = validation_flux_ti
@@ -234,7 +234,7 @@ def main() -> None:
         # Recalculate deposition logits for the current update
         deposition_logit_ti = torch.tensor(np.log(current_flux_ti * n_sites)).to(device)
         deposition_logit_o = torch.tensor(np.log(current_flux_o * n_sites)).to(device)
-        
+
         # Reset environment and clear rollout storage for the new update
         logger.debug("Resetting environment and clearing rollout buffers for new update.")
         all_obs = []  # List of (full_obs_dict)
@@ -469,8 +469,8 @@ def main() -> None:
             writer.add_scalar("losses/entropy", total_entropy / num_policy_updates, global_step)
         writer.add_scalar("charts/mean_reward", mean_reward, global_step)
 
-        # Log failure reasons for a few steps to debug
-        if update == 1 and env.step_info:
+        # Log action outcomes for debugging (update 1 and every validation update)
+        if (update == 1 or (update % 5 == 0 and update <= 20)) and env.step_info:
             logger.info("\n--- Sample of Action Outcomes (Update 1) ---")
             total_steps = len(env.step_info)
             # First 30 steps

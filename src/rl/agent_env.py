@@ -113,7 +113,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             low=-np.inf, high=np.inf, shape=(58,), dtype=np.float32
         )
         self.global_feature_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(12,), dtype=np.float32
         )
         self.observation_space = spaces.Dict(
             {
@@ -160,7 +160,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         self._action_history_size = 10  # Track last 10 actions
         self._loop_penalty = 1.0  # Penalty for detected loops
         self._step_penalty = 0.005  # Small penalty per step to encourage efficiency
-        self._action_type_history: list[str] = []  # Track action types for DEPOSIT->DESORB detection
+        self._action_type_history: list[
+            str
+        ] = []  # Track action types for DEPOSIT->DESORB detection
 
         # Observation caching: cache agent observations to avoid recomputation
         self._observation_cache: dict[
@@ -594,16 +596,43 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 # Remove from dirty set
                 self._dirty_observations.discard(site_idx)
 
-        # Global features
+        # Compute thermodynamic and structural features for the critic
+        total_energy = self.energy_calculator.calculate_total_energy(self.lattice)
+        num_ti = self._species_counts[SpeciesType.TI]
+        num_o = self._species_counts[SpeciesType.O]
+        num_atoms = num_ti + num_o
+
+        # Count bonds
+        num_ti_ti_bonds, num_ti_o_bonds, num_o_o_bonds = self._count_bonds()
+        total_bonds = num_ti_ti_bonds + num_ti_o_bonds + num_o_o_bonds
+
+        # Grand potential (Ω = E - μN)
+        mu_ti = self.tio2_params.mu_ti
+        mu_o = self.tio2_params.mu_o
+        grand_potential = total_energy - (mu_ti * num_ti + mu_o * num_o)
+
+        # Average coordination (bonds per atom)
+        avg_coordination = (total_bonds / num_atoms) if num_atoms > 0 else 0.0
+
+        # Bond density (bonds per lattice site)
+        total_sites = np.prod(self.lattice_size)
+        bond_density = total_bonds / total_sites
+
+        # Global features with rich thermodynamic information
         global_features = np.array(
             [
                 self._calculate_mean_height(),
                 self._calculate_height_std(),
-                0.0,  # Roughness (not computed during episode)
-                0.0,  # Coverage (not computed during episode)
                 self._species_counts[SpeciesType.TI],
                 self._species_counts[SpeciesType.O],
                 self._species_counts[SpeciesType.VACANT],
+                total_energy,  # NEW: System energy
+                grand_potential,  # NEW: Grand potential Ω
+                float(total_bonds),  # NEW: Total number of bonds
+                avg_coordination,  # NEW: Average coordination number
+                bond_density,  # NEW: Bond density (structural compactness)
+                float(num_ti_o_bonds),  # NEW: Ti-O bonds (most important for TiO2)
+                float(num_atoms),  # NEW: Total atoms
             ],
             dtype=np.float32,
         )
@@ -638,7 +667,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Anti-repetition penalty: discourage immediate DEPOSIT→DESORB cycles
         # This is reward shaping, NOT physics violation - thermodynamics still intact
-        if len(self._action_type_history) >= 2 and (self._action_type_history[-2] == "DEPOSIT" and self._action_type_history[-1] == "DESORB"):
+        if len(self._action_type_history) >= 2 and (
+            self._action_type_history[-2] == "DEPOSIT" and self._action_type_history[-1] == "DESORB"
+        ):
             reward -= 0.1  # Scaled penalty to match scaled rewards
 
         # Update previous grand potential for next step
@@ -695,6 +726,43 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
     def _count_species(self, species: SpeciesType) -> int:
         """Count atoms of given species (cached, O(1))."""
         return self._species_counts.get(species, 0)
+
+    def _count_bonds(self) -> tuple[int, int, int]:
+        """
+        Count the number of bonds in the system.
+
+        Returns:
+            Tuple of (Ti-Ti bonds, Ti-O bonds, O-O bonds)
+        """
+        ti_ti_bonds = 0
+        ti_o_bonds = 0
+        o_o_bonds = 0
+
+        # Count each bond once by only looking at neighbors with higher indices
+        for i, site in enumerate(self.lattice.sites):
+            if site.species == SpeciesType.VACANT:
+                continue
+
+            # Check all neighbors
+            for neighbor_idx in self.lattice.get_neighbor_indices(i):
+                # Only count each bond once (when i < neighbor_idx)
+                if neighbor_idx <= i:
+                    continue
+
+                neighbor = self.lattice.sites[neighbor_idx]
+                if neighbor.species == SpeciesType.VACANT:
+                    continue
+
+                # Classify the bond
+                if site.species == SpeciesType.TI:
+                    if neighbor.species == SpeciesType.TI:
+                        ti_ti_bonds += 1
+                    elif neighbor.species == SpeciesType.O:
+                        ti_o_bonds += 1
+                elif site.species == SpeciesType.O and neighbor.species == SpeciesType.O:
+                    o_o_bonds += 1
+
+        return ti_ti_bonds, ti_o_bonds, o_o_bonds
 
     def _update_species_counts_full(self) -> None:
         """Full recount of all species (only at reset)."""
