@@ -269,27 +269,29 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
     def _try_automatic_deposition(self) -> tuple[bool, str, str]:
         """
         Attempt automatic deposition based on flux probability.
-        
+
         Physical motivation: Deposition is an external event, not controlled
         by the film. Atoms arrive according to the flux, independent of
         surface dynamics.
-        
+
         Returns:
             (deposited, species_str, reason): Whether deposition occurred,
             what was deposited, and reason if failed
         """
-        n_sites = self.lattice_size[0] * self.lattice_size[1]
-        
         # Calculate deposition probabilities (events per site per step)
         # Flux is in ML/s, we treat each step as one time unit
-        p_deposit_ti = self.current_flux_ti * n_sites
-        p_deposit_o = self.current_flux_o * n_sites
-        
+        # Cache calculation: n_sites is constant for the environment
+        if not hasattr(self, '_cached_n_sites'):
+            self._cached_n_sites = self.lattice_size[0] * self.lattice_size[1]
+
+        p_deposit_ti = self.current_flux_ti * self._cached_n_sites
+        p_deposit_o = self.current_flux_o * self._cached_n_sites
+
         # Total deposition probability
         p_deposit_total = p_deposit_ti + p_deposit_o
-        
-        # Decide if deposition occurs this step
-        if np.random.random() < min(p_deposit_total, 1.0):
+
+        # Fast path: if total probability >= 1, deposition always occurs
+        if p_deposit_total >= 1.0:
             # Choose which species based on relative fluxes
             if np.random.random() < (p_deposit_ti / p_deposit_total):
                 success, reason = self._execute_deposition(species=SpeciesType.TI)
@@ -297,7 +299,17 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             else:
                 success, reason = self._execute_deposition(species=SpeciesType.O)
                 return success, "DEPOSIT_O", reason
-        
+
+        # Slow path: probabilistic deposition
+        if np.random.random() < p_deposit_total:
+            # Choose which species based on relative fluxes
+            if np.random.random() < (p_deposit_ti / p_deposit_total):
+                success, reason = self._execute_deposition(species=SpeciesType.TI)
+                return success, "DEPOSIT_TI", reason
+            else:
+                success, reason = self._execute_deposition(species=SpeciesType.O)
+                return success, "DEPOSIT_O", reason
+
         return False, "NONE", "No deposition this step"
 
     def step(self, action: tuple[int, int] | str | None) -> tuple[dict, float, bool, bool, dict]:
