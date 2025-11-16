@@ -294,7 +294,7 @@ def main() -> None:
 
         # --- Rollout Collection Phase ---
         logger.debug("Collecting rollouts...")
-        
+
         # Calculate deposition probability for this rollout based on flux
         # Using Poisson model: P(deposition) = 1 - exp(-λ), where λ = flux * n_sites * Δt
         n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
@@ -303,18 +303,22 @@ def main() -> None:
         lambda_o = current_flux_o * n_sites * delta_t
         lambda_total = lambda_ti + lambda_o
         p_deposit = 1.0 - np.exp(-lambda_total)
-        
+
         # Log deposition parameters at the start of each logged update
         if should_log_this_update:
-            logger.info(f"  Deposition params: λ_Ti={lambda_ti:.3f}, λ_O={lambda_o:.3f}, λ_total={lambda_total:.3f}, P(deposit)={p_deposit:.1%}")
-            logger.info(f"  Expected: ~{int(p_deposit * CONFIG['num_steps'])} depositions, ~{int((1-p_deposit) * CONFIG['num_steps'])} agent actions per rollout")
-        
+            logger.info(
+                f"  Deposition params: λ_Ti={lambda_ti:.3f}, λ_O={lambda_o:.3f}, λ_total={lambda_total:.3f}, P(deposit)={p_deposit:.1%}"
+            )
+            logger.info(
+                f"  Expected: ~{int(p_deposit * CONFIG['num_steps'])} depositions, ~{int((1 - p_deposit) * CONFIG['num_steps'])} agent actions per rollout"
+            )
+
         # Track statistics for logging
         num_depositions_in_rollout = 0
         num_agent_actions_in_rollout = 0
         actor_rewards = []  # Rewards from agent actions only
         deposition_rewards = []  # Rewards from depositions only
-        
+
         for _step in range(CONFIG["num_steps"]):
             if _step > 0 and _step % 256 == 0:
                 logger.info(f"  Rollout step {_step}/{CONFIG['num_steps']}...")
@@ -343,17 +347,17 @@ def main() -> None:
                         action = "DEPOSIT_TI"
                     else:
                         action = "DEPOSIT_O"
-                    
+
                     all_actions.append(action)
                     all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
                     all_diffusion_logits.append(np.zeros((0, action_dim), dtype=np.float32))
                     all_logprobs.append(torch.tensor(0.0).to(device))  # No policy decision
-                    
+
                     # Execute deposition
                     next_obs, reward, terminated, truncated, info = env.step(action)
                     num_depositions_in_rollout += 1
                     deposition_rewards.append(reward)
-                    
+
                 elif num_agents > 0:
                     # AGENT ACTION (surface kinetics)
                     obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
@@ -371,7 +375,7 @@ def main() -> None:
 
                     # Flatten diffusion logits
                     all_possible_logits = diffusion_logits.flatten()
-                    
+
                     # Gumbel-Max for action selection
                     gumbel_action_idx, log_prob = select_action_gumbel_max(all_possible_logits)
                     all_logprobs.append(log_prob)
@@ -390,12 +394,12 @@ def main() -> None:
                 else:
                     # No deposition AND no agents: force deposition to bootstrap
                     action = "DEPOSIT_TI" if np.random.random() < 0.5 else "DEPOSIT_O"
-                    
+
                     all_actions.append(action)
                     all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
                     all_diffusion_logits.append(np.zeros((0, action_dim), dtype=np.float32))
                     all_logprobs.append(torch.tensor(0.0).to(device))
-                    
+
                     # Execute forced deposition
                     next_obs, reward, terminated, truncated, info = env.step(action)
                     num_depositions_in_rollout += 1
@@ -412,9 +416,11 @@ def main() -> None:
             total_steps = CONFIG["num_steps"]
             dep_pct = 100.0 * num_depositions_in_rollout / total_steps
             agent_pct = 100.0 * num_agent_actions_in_rollout / total_steps
-            logger.info(f"  Rollout summary: {num_depositions_in_rollout} depositions ({dep_pct:.1f}%), "
-                       f"{num_agent_actions_in_rollout} agent actions ({agent_pct:.1f}%)")
-        
+            logger.info(
+                f"  Rollout summary: {num_depositions_in_rollout} depositions ({dep_pct:.1f}%), "
+                f"{num_agent_actions_in_rollout} agent actions ({agent_pct:.1f}%)"
+            )
+
         logger.debug("Rollout collection finished.")
         # --- GAE and Advantage Calculation ---
         logger.debug("Calculating GAE and advantages...")
@@ -473,10 +479,10 @@ def main() -> None:
 
                 # Always compute new value for critic training
                 new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
-                
+
                 # Check if this was an agent action (not deposition)
                 is_agent_action = isinstance(taken_action, tuple) and taken_action is not None
-                
+
                 if is_agent_action and num_agents > 0:
                     # AGENT ACTION: Train both actor and critic
                     # Recalculate log_probs, entropy for actor
@@ -534,7 +540,7 @@ def main() -> None:
                         total_v_loss += v_loss.item()
                         total_entropy += entropy_loss.item()
                         num_policy_updates += 1
-                
+
                 else:
                     # DEPOSITION or NO ACTION: Train only critic
                     # Value loss only
@@ -561,7 +567,7 @@ def main() -> None:
         mean_reward = np.mean(all_rewards) if all_rewards else 0.0
         mean_actor_reward = np.mean(actor_rewards) if actor_rewards else 0.0
         mean_deposition_reward = np.mean(deposition_rewards) if deposition_rewards else 0.0
-        
+
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("charts/sps", sps, global_step)
         if num_policy_updates > 0:
@@ -593,12 +599,12 @@ def main() -> None:
                 logger.info(
                     f"  Structural Metrics - Ti:O ratio: {avg_ti_o_ratio:.3f}, Avg coord: {avg_coordination:.2f}, Ti-O bonds: {avg_ti_o_fraction:.1%}"
                 )
-        
+
         # --- DETAILED STEP LOGGING (AFTER PO) ---
         # Log detailed first 30, middle 30, and last 30 steps for selected updates
         if should_log_this_update:
             total_steps = len(all_actions)
-            
+
             # First 30 steps
             logger.info("\n--- First 30 Steps ---")
             for i in range(min(log_window_size, total_steps)):
@@ -606,7 +612,7 @@ def main() -> None:
                 reward = all_rewards[i]
                 obs = all_obs[i]
                 n_agents = len(obs["agent_observations"])
-                
+
                 if isinstance(action, str):
                     species_name = "Ti" if action == "DEPOSIT_TI" else "O"
                     logger.info(
@@ -620,7 +626,7 @@ def main() -> None:
                         f"  [{i:3d}] AGENT[{agent_idx:2d}] {action_name:14s} → "
                         f"Reward: {reward:+6.3f}, Agents: {n_agents:3d}"
                     )
-            
+
             # Middle 30 steps
             if total_steps > 60:
                 logger.info("\n--- Middle 30 Steps ---")
@@ -631,7 +637,7 @@ def main() -> None:
                     reward = all_rewards[i]
                     obs = all_obs[i]
                     n_agents = len(obs["agent_observations"])
-                    
+
                     if isinstance(action, str):
                         species_name = "Ti" if action == "DEPOSIT_TI" else "O"
                         logger.info(
@@ -645,7 +651,7 @@ def main() -> None:
                             f"  [{i:3d}] AGENT[{agent_idx:2d}] {action_name:14s} → "
                             f"Reward: {reward:+6.3f}, Agents: {n_agents:3d}"
                         )
-            
+
             # Last 30 steps
             if total_steps > log_window_size:
                 logger.info("\n--- Last 30 Steps ---")
@@ -654,7 +660,7 @@ def main() -> None:
                     reward = all_rewards[i]
                     obs = all_obs[i]
                     n_agents = len(obs["agent_observations"])
-                    
+
                     if isinstance(action, str):
                         species_name = "Ti" if action == "DEPOSIT_TI" else "O"
                         logger.info(
@@ -670,7 +676,9 @@ def main() -> None:
                         )
             logger.info("")
 
-        print(f"Update {update}/{num_updates} | SPS: {sps} | Actor Reward: {mean_actor_reward:.4f} | Total Reward: {mean_reward:.4f}")
+        print(
+            f"Update {update}/{num_updates} | SPS: {sps} | Actor Reward: {mean_actor_reward:.4f} | Total Reward: {mean_reward:.4f}"
+        )
 
         # Episode tracking and model saving
         episode_count += 1
@@ -706,7 +714,9 @@ def main() -> None:
                 },
                 best_model_path,
             )
-            logger.info(f"New best model saved! Episode {episode_count}, Actor Reward: {mean_actor_reward:.4f}")
+            logger.info(
+                f"New best model saved! Episode {episode_count}, Actor Reward: {mean_actor_reward:.4f}"
+            )
 
         # Clear rollout storage
         (
