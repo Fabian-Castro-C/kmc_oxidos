@@ -380,7 +380,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         if action is not None and not isinstance(action, str):
             agent = self.agents[agent_idx] if agent_idx < len(self.agents) else None
             action_signature = (agent.site_idx if agent else -1, action_idx)
-            
+
             if success and ActionType(action_idx) == ActionType.DESORB:
                 self._action_type_history.append("DESORB")
             else:

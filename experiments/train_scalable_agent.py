@@ -331,7 +331,7 @@ def main() -> None:
                     all_actions.append(action)
                     # Use zero log_prob for no-action steps
                     all_logprobs.append(torch.tensor(0.0).to(device))
-                    
+
                     # Execute step with no agent action (only automatic deposition)
                     next_obs, reward, terminated, truncated, _ = env.step(action)
                     done = terminated or truncated
@@ -415,7 +415,7 @@ def main() -> None:
 
                 # Determine which action was taken
                 taken_action = all_actions[i]
-                
+
                 # Skip if no action was taken (no agents case)
                 if taken_action is None:
                     continue
