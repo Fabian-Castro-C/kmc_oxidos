@@ -42,6 +42,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def get_flux_for_update(update_num: int, config: dict) -> tuple[float, float]:
+    """
+    Get deposition flux for current update based on flux schedule.
+
+    Args:
+        update_num: Current update number (1-indexed)
+        config: Configuration dict with flux schedule settings
+
+    Returns:
+        (flux_ti, flux_o): Titanium and oxygen flux in ML/s
+    """
+    if not config.get("enable_flux_schedule", False):
+        # No schedule, use fixed training flux
+        return config["deposition_flux_ti"], config["deposition_flux_o"]
+
+    flux_stages = config.get("flux_stages", [])
+    if not flux_stages:
+        return config["deposition_flux_ti"], config["deposition_flux_o"]
+
+    # Find the active stage (last stage where update_num >= at_update)
+    active_stage = flux_stages[0]
+    for stage in flux_stages:
+        if update_num >= stage["at_update"]:
+            active_stage = stage
+        else:
+            break
+
+    return active_stage["flux_ti"], active_stage["flux_o"]
+
+
 # --- Default Configuration (for backward compatibility) ---
 DEFAULT_CONFIG = {
     "project_name": "Scalable_TiO2_PPO",
@@ -206,7 +237,9 @@ def main() -> None:
         critic.load_state_dict(checkpoint["critic_state_dict"])
         episode_count = checkpoint.get("episode", 0)
         best_mean_reward = checkpoint.get("mean_reward", float("-inf"))
-        logger.info(f"Checkpoint loaded! Resuming from episode {episode_count}, best reward: {best_mean_reward:.4f}")
+        logger.info(
+            f"Checkpoint loaded! Resuming from episode {episode_count}, best reward: {best_mean_reward:.4f}"
+        )
     else:
         # Best model tracking (starting from scratch)
         best_mean_reward = float("-inf")
@@ -218,18 +251,20 @@ def main() -> None:
     num_updates = CONFIG["total_timesteps"] // CONFIG["num_steps"]
 
     for update in range(1, num_updates + 1):
-        # --- Curriculum and Reset Logic ---
-        # Determine if this is a validation update (1x flux) or training update (100x flux)
-        is_validation_update = (update % 5 == 0)
+        # --- Flux Schedule: Get current flux based on schedule ---
+        current_flux_ti, current_flux_o = get_flux_for_update(update, CONFIG)
+
+        # Determine if this is a validation update (every 5th)
+        is_validation_update = update % 5 == 0
 
         if is_validation_update:
-            logger.info(f"\n--- Validation Update {update}/{num_updates}: Using 1x deposition flux ---")
-            current_flux_ti = validation_flux_ti
-            current_flux_o = validation_flux_o
+            logger.info(
+                f"\n--- Validation Update {update}/{num_updates}: Using flux Ti={current_flux_ti:.1f}, O={current_flux_o:.1f} ML/s ---"
+            )
         else:
-            logger.info(f"\n--- Training Update {update}/{num_updates}: Using 100x deposition flux ---")
-            current_flux_ti = train_flux_ti
-            current_flux_o = train_flux_o
+            logger.info(
+                f"\n--- Training Update {update}/{num_updates}: Using flux Ti={current_flux_ti:.1f}, O={current_flux_o:.1f} ML/s ---"
+            )
 
         # Recalculate deposition logits for the current update
         deposition_logit_ti = torch.tensor(np.log(current_flux_ti * n_sites)).to(device)
@@ -418,9 +453,7 @@ def main() -> None:
                     new_logprob = dist.log_prob(torch.tensor(gumbel_action_idx).to(device))
                     entropy = dist.entropy().mean()
 
-                    new_value = critic(
-                        torch.from_numpy(current_global_obs).unsqueeze(0).to(device)
-                    )
+                    new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
 
                     # Policy loss
                     logratio = new_logprob - b_logprobs[i]
@@ -469,6 +502,28 @@ def main() -> None:
             writer.add_scalar("losses/entropy", total_entropy / num_policy_updates, global_step)
         writer.add_scalar("charts/mean_reward", mean_reward, global_step)
 
+        # Log structural metrics if available
+        structural_metrics_collected = [info for info in env.step_info if "ti_o_ratio" in info]
+        if structural_metrics_collected:
+            # Average structural metrics over the update
+            avg_ti_o_ratio = np.mean([m["ti_o_ratio"] for m in structural_metrics_collected])
+            avg_coordination = np.mean(
+                [m["avg_coordination"] for m in structural_metrics_collected]
+            )
+            avg_ti_o_fraction = np.mean(
+                [m["ti_o_bonds_fraction"] for m in structural_metrics_collected]
+            )
+
+            writer.add_scalar("structure/ti_o_ratio", avg_ti_o_ratio, global_step)
+            writer.add_scalar("structure/avg_coordination", avg_coordination, global_step)
+            writer.add_scalar("structure/ti_o_bonds_fraction", avg_ti_o_fraction, global_step)
+
+            # Log to console on validation updates
+            if is_validation_update:
+                logger.info(
+                    f"  Structural Metrics - Ti:O ratio: {avg_ti_o_ratio:.3f}, Avg coord: {avg_coordination:.2f}, Ti-O bonds: {avg_ti_o_fraction:.1%}"
+                )
+
         # Log action outcomes for debugging (update 1 and every validation update)
         if (update == 1 or (update % 5 == 0 and update <= 20)) and env.step_info:
             logger.info("\n--- Sample of Action Outcomes (Update 1) ---")
@@ -499,9 +554,13 @@ def main() -> None:
                         else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
                     )
                     if not info["success"]:
-                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                        print(
+                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+                        )
                     else:
-                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+                        print(
+                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                        )
             # Last 30 steps
             if total_steps > 30:
                 print("\n[Last 30 steps]")
@@ -513,9 +572,13 @@ def main() -> None:
                         else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
                     )
                     if not info["success"]:
-                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                        print(
+                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+                        )
                     else:
-                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+                        print(
+                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                        )
 
         # Log periodically to monitor behavior during training
         if update % 3 == 0 and env.step_info:
@@ -547,9 +610,13 @@ def main() -> None:
                         else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
                     )
                     if not info["success"]:
-                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                        print(
+                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+                        )
                     else:
-                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+                        print(
+                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                        )
             # Last 30 steps
             if total_steps > 30:
                 print("\n[Last 30 steps]")
@@ -561,9 +628,13 @@ def main() -> None:
                         else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
                     )
                     if not info["success"]:
-                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                        print(
+                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+                        )
                     else:
-                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+                        print(
+                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                        )
 
         # Log for last update to see what's happening
         if update == num_updates and env.step_info:
@@ -595,9 +666,13 @@ def main() -> None:
                         else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
                     )
                     if not info["success"]:
-                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                        print(
+                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+                        )
                     else:
-                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+                        print(
+                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                        )
             # Last 30 steps
             if total_steps > 30:
                 print("\n[Last 30 steps]")
@@ -609,9 +684,13 @@ def main() -> None:
                         else f"Agent {info['executed_action'][0]}, Action {info['executed_action'][1]}"
                     )
                     if not info["success"]:
-                        print(f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}")
+                        print(
+                            f"Step {i}: Action {action_str} failed. Reason: {info['failure_reason']}"
+                        )
                     else:
-                        print(f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}")
+                        print(
+                            f"Step {i}: Action {action_str} succeeded. Reward: {info['reward']:.4f}"
+                        )
 
         print(f"Update {update}/{num_updates} | SPS: {sps} | Mean Reward: {mean_reward:.4f}")
 
@@ -650,7 +729,16 @@ def main() -> None:
             logger.info(f"New best model saved! Episode {episode_count}, Reward: {mean_reward:.4f}")
 
         # Clear rollout storage
-        all_obs, all_actions, all_logprobs, all_rewards, all_dones, all_values, all_action_masks, all_diffusion_logits = (
+        (
+            all_obs,
+            all_actions,
+            all_logprobs,
+            all_rewards,
+            all_dones,
+            all_values,
+            all_action_masks,
+            all_diffusion_logits,
+        ) = (
             [],
             [],
             [],

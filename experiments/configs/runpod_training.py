@@ -30,14 +30,52 @@ ENV_CONFIG = {
     "lattice_size": (10, 10, 50),  # Small lattice for fast training
     # Physical parameters (MUST match between training and inference)
     "temperature": 600.0,  # Kelvin - PVD typical temperature
-    "deposition_flux_ti": 10.0,  # ML/s - Titanium flux (training, AGGRESSIVE curriculum)
-    "deposition_flux_o": 20.0,  # ML/s - Oxygen flux (training, AGGRESSIVE curriculum)
-    "validation_flux_ti": 1.0,  # ML/s - Titanium flux (validation, experimental typical)
-    "validation_flux_o": 2.0,  # ML/s - Oxygen flux (validation, experimental typical)
+    "deposition_flux_ti": 1.0,  # ML/s - Titanium flux (training, AGGRESSIVE curriculum)
+    "deposition_flux_o": 2.0,  # ML/s - Oxygen flux (training, AGGRESSIVE curriculum)
+    "validation_flux_ti": 0.1,  # ML/s - Titanium flux (validation, experimental typical)
+    "validation_flux_o": 0.2,  # ML/s - Oxygen flux (validation, experimental typical)
     # Episode configuration
     "max_steps_per_episode": 3000,  # Longer episodes for larger system equilibration
     # Random seed for reproducibility
     "seed": 42,
+}
+
+# ============================================================================
+# FLUX SCHEDULE (Progressive Curriculum)
+# ============================================================================
+FLUX_SCHEDULE_CONFIG = {
+    "enable_flux_schedule": True,
+    # Progressive flux reduction to force structural refinement
+    # Phase 1: Fast deposition (learn basic bonding)
+    # Phase 2: Moderate flux (balance deposition/diffusion)
+    # Phase 3: Realistic flux (learn full dynamics)
+    "flux_stages": [
+        {"at_update": 0, "flux_ti": 10.0, "flux_o": 20.0},  # 10x - fast initial learning
+        {"at_update": 10, "flux_ti": 5.0, "flux_o": 10.0},  # 5x - transition phase
+        {"at_update": 20, "flux_ti": 1.0, "flux_o": 2.0},  # 1x - refinement phase
+        {"at_update": 100, "flux_ti": 0.1, "flux_o": 0.2},  # 0.1x - realistic experimental
+    ],
+}
+
+# ============================================================================
+# REWARD SHAPING (Conservative, Physics-Motivated)
+# ============================================================================
+REWARD_SHAPING_CONFIG = {
+    "enable_reward_shaping": True,
+    # A. Exploration Bonus for DIFFUSE/DESORB actions
+    # Motivation: Compensate thermodynamic penalty to allow exploration
+    "exploration_bonus_enabled": True,
+    "exploration_bonus_amount": 0.4,  # Small bonus for non-deposition actions
+    "exploration_bonus_threshold": -2.0,  # Only if base_reward > this (not catastrophic)
+    # Structural metrics logging (NO reward impact, just monitoring)
+    "log_structural_metrics": True,
+    "structural_metrics": [
+        "roughness",  # Surface roughness (RMS height variation)
+        "avg_coordination",  # Average coordination number
+        "ti_o_ratio",  # Ti:O stoichiometric ratio
+        "bond_density",  # Total bonds per atom
+        "ti_o_bonds_fraction",  # Fraction of Ti-O bonds vs all bonds
+    ],
 }
 
 # ============================================================================
@@ -197,6 +235,8 @@ CONFIG = {
     **MONITORING_CONFIG,
     **CONVERGENCE_CONFIG,
     **CURRICULUM_CONFIG,
+    **FLUX_SCHEDULE_CONFIG,
+    **REWARD_SHAPING_CONFIG,
 }
 
 # Add paths

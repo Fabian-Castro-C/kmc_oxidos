@@ -319,8 +319,22 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         if len(self._recent_actions) > self._action_history_size:
             self._recent_actions.pop(0)
 
+        # Determine if this was an exploration action (DIFFUSE or DESORB)
+        action_was_exploration = False
+        if success and not is_deposition_action:
+            action_type_enum = ActionType(action_idx)
+            action_was_exploration = action_type_enum in [
+                ActionType.DESORB,
+                ActionType.DIFFUSE_X_POS,
+                ActionType.DIFFUSE_X_NEG,
+                ActionType.DIFFUSE_Y_POS,
+                ActionType.DIFFUSE_Y_NEG,
+                ActionType.DIFFUSE_Z_POS,
+                ActionType.DIFFUSE_Z_NEG,
+            ]
+
         # Calculate reward based on change in grand potential
-        reward = self._calculate_reward()
+        reward = self._calculate_reward(action_was_exploration=action_was_exploration)
 
         # Detect and penalize loops
         if self._detect_action_loop():
@@ -331,6 +345,31 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             # We apply a small penalty to discourage the agent from choosing invalid actions.
             reward = -0.01
         self.total_reward += reward
+
+        # --- STRUCTURAL METRICS LOGGING (no reward impact) ---
+        # Compute structural metrics every N steps for monitoring
+        structural_metrics = {}
+        if self.step_count % 100 == 0 or terminated or truncated:
+            # Calculate key structural metrics
+            n_ti = self._count_species(SpeciesType.TI)
+            n_o = self._count_species(SpeciesType.O)
+            ti_o_ratio = n_ti / (n_o / 2.0) if n_o > 0 else 0.0
+
+            # Count bonds (already computed for critic features)
+            ti_ti_bonds, ti_o_bonds, o_o_bonds = self._count_bonds()
+            total_bonds = ti_ti_bonds + ti_o_bonds + o_o_bonds
+            ti_o_fraction = ti_o_bonds / total_bonds if total_bonds > 0 else 0.0
+
+            # Average coordination from global features
+            global_features = self._get_observation()["global_features"]
+            avg_coordination = global_features[3]  # Index 3 is avg_coord in _get_observation
+
+            structural_metrics = {
+                "ti_o_ratio": ti_o_ratio,
+                "avg_coordination": avg_coordination,
+                "ti_o_bonds_fraction": ti_o_fraction,
+                "total_bonds": total_bonds,
+            }
 
         # Check termination conditions
         terminated = False  # Define a success condition, e.g., target thickness
@@ -364,6 +403,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             "reward": reward,
             "success": success,
             "failure_reason": reason,
+            **structural_metrics,  # Add structural metrics if computed
         }
         self.step_info.append(info)
 
@@ -642,15 +682,22 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             "global_features": global_features,
         }
 
-    def _calculate_reward(self) -> float:
+    def _calculate_reward(
+        self,
+        action_was_exploration: bool = False,
+    ) -> float:
         """
-        Calculate SwarmThinkers reward for an open system: r_t = -ΔΩ.
+        Calculate SwarmThinkers reward for an open system: r_t = -ΔΩ + bonuses.
 
         A negative change in grand potential (system becomes more stable)
         results in a positive reward.
 
+        Args:
+            action_was_exploration: True if action was DIFFUSE or DESORB
+            base_reward_before_scaling: Unscaled -ΔΩ value (for bonus threshold check)
+
         Returns:
-            Reward r_t = -ΔΩ (eV), scaled to reduce variance
+            Reward r_t = -ΔΩ (eV) + exploration bonus, scaled to reduce variance
         """
         # Calculate current grand potential
         current_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
@@ -660,6 +707,14 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Reward = -ΔΩ (favor stability) - step_penalty (encourage efficiency)
         reward = -delta_omega - self._step_penalty
+
+        # --- REWARD SHAPING: Exploration Bonus ---
+        # Compensate thermodynamic penalty for DIFFUSE/DESORB to allow exploration
+        # Only apply if the unscaled reward is not catastrophically negative
+        exploration_bonus = 0.0
+        if action_was_exploration and reward > -2.0:  # Threshold before scaling
+            exploration_bonus = 0.4  # Small bonus to offset typical diffusion/desorption cost
+            reward += exploration_bonus
 
         # Scale reward to reduce variance (rewards range from ~-10 to +13 eV)
         # Scaling by 5.0 brings them to ~-2 to +2.6 range, easier for RL to learn
