@@ -70,8 +70,9 @@ FLUX_SCHEDULE_CONFIG = {
     #   ~1 deposition every 20 steps
     #
     "flux_stages": [
-        {"at_update": 0, "flux_ti": 0.5, "flux_o": 1.0},     # Initial high flux for exploration
-        {"at_update": 200, "flux_ti": 0.1, "flux_o": 0.2},     # λ=0.3: P≈26%
+        {"at_update": 0, "flux_ti": 0.1, "flux_o": 0.2},     # λ=0.3: P≈26%, ~533 depositions
+        {"at_update": 200, "flux_ti": 0.07, "flux_o": 0.13},  # λ=0.2: P≈18%, ~369 depositions
+        {"at_update": 400, "flux_ti": 0.03, "flux_o": 0.07},  # λ=0.1: P≈9.5%, ~195 depositions
     ],
 }
 

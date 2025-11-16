@@ -161,6 +161,9 @@ def main() -> None:
     logger.info(f"Training Configuration: {CONFIG.get('project_name', 'TiO2_Training')}")
     logger.info(f"Run Name: {CONFIG['run_name']}")
     logger.info(f"Device: {device}")
+    if device.type == "cuda":
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     logger.info(f"Lattice Size: {CONFIG['lattice_size']}")
     logger.info(f"Total Timesteps: {CONFIG['total_timesteps']:,}")
     logger.info("=" * 80)
@@ -321,7 +324,9 @@ def main() -> None:
 
         for _step in range(CONFIG["num_steps"]):
             if _step > 0 and _step % 256 == 0:
-                logger.info(f"  Rollout step {_step}/{CONFIG['num_steps']}...")
+                elapsed = time.time() - start_time
+                steps_per_sec = global_step / elapsed if elapsed > 0 else 0
+                logger.info(f"  Rollout step {_step}/{CONFIG['num_steps']} | SPS: {steps_per_sec:.1f}")
             global_step += 1
             all_dones.append(next_done)
             all_obs.append({"agent_observations": agent_obs, "global_features": global_obs})
