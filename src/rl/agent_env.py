@@ -328,8 +328,10 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         deposition_occurred, deposit_species, deposit_reason = self._try_automatic_deposition()
         if deposition_occurred:
             self._action_type_history.append("DEPOSIT")
-            # Update prev_omega AFTER deposition so agent reward only reflects its action
-            self.prev_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
+            # Flag that we need to update prev_omega before calculating agent reward
+            self._deposition_occurred_this_step = True
+        else:
+            self._deposition_occurred_this_step = False
 
         # AGENT ACTION (policy-controlled surface dynamics)
         if action is None:
@@ -760,12 +762,17 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         Args:
             action_was_exploration: True if action was DIFFUSE or DESORB
-            base_reward_before_scaling: Unscaled -ΔΩ value (for bonus threshold check)
 
         Returns:
             Reward r_t = -ΔΩ (eV) + exploration bonus, scaled to reduce variance
         """
-        # Calculate current grand potential
+        # If deposition occurred this step, update prev_omega to exclude it from agent's reward
+        if hasattr(self, '_deposition_occurred_this_step') and self._deposition_occurred_this_step:
+            self.prev_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
+            # Don't calculate again below, just return 0 reward for the deposition itself
+            # The agent's action reward will be calculated on the next call
+            
+        # Calculate current grand potential (only once per step now)
         current_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
 
         # Grand potential change
