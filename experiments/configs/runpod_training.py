@@ -70,9 +70,7 @@ FLUX_SCHEDULE_CONFIG = {
     #   ~1 deposition every 20 steps
     #
     "flux_stages": [
-        {"at_update": 0, "flux_ti": 0.1, "flux_o": 0.2},     # λ=0.3: P≈26%, ~533 depositions
-        {"at_update": 200, "flux_ti": 0.07, "flux_o": 0.13},  # λ=0.2: P≈18%, ~369 depositions
-        {"at_update": 400, "flux_ti": 0.03, "flux_o": 0.07},  # λ=0.1: P≈9.5%, ~195 depositions
+        {"at_update": 0, "flux_ti": 0.1, "flux_o": 0.2},
     ],
 }
 
@@ -123,7 +121,7 @@ PPO_CONFIG = {
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
-    "update_epochs": 3,  # Number of epochs per PPO update (increased to better utilize good experiences)
+    "update_epochs": 2,  # Number of epochs per PPO update (increased to better utilize good experiences)
 }
 
 # ============================================================================

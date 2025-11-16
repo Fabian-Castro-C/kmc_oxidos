@@ -86,9 +86,12 @@ class TiO2Parameters:
     bond_energy_ti_ti: float = -2.0  # eV (metallic bond)
     bond_energy_o_o: float = -1.5  # eV (weak interaction)
 
-    # Chemical potentials (adsorption energies)
-    mu_ti: float = -5.5  # eV (typical DFT value for Ti on TiO2 surface)
-    mu_o: float = -3.5   # eV (typical DFT value for O on TiO2 surface)
+    # Chemical potentials for GROWTH process (Grand Canonical ensemble)
+    # For deposition from vapor phase, μ represents the cost of removing an atom
+    # Positive values favor growth, negative values favor etching
+    # Values should reflect: μ ≈ -(adsorption_energy + bond_contributions)
+    mu_ti: float = +5.5  # eV (cost of removing Ti from growing film)
+    mu_o: float = +3.5   # eV (cost of removing O from growing film)
 
     # Substrate adsorption energies (for atoms in contact with substrate at z=0)
     # Using SiO2 amorphous substrate for Volmer-Weber (3D island) growth

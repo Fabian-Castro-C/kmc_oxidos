@@ -256,7 +256,7 @@ def main() -> None:
     obs, _ = env.reset()
 
     # Define logging frequency: log detailed steps every N updates
-    log_every_n_updates = 10  # Log every 10 updates
+    log_every_n_updates = 5  # Log every 5 updates
     log_window_size = 30  # Log first 30 steps of each logged update
 
     for update in range(1, num_updates + 1):
