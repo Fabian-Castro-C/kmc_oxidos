@@ -346,6 +346,10 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             reward = -0.01
         self.total_reward += reward
 
+        # Check termination conditions
+        terminated = False  # Define a success condition, e.g., target thickness
+        truncated = self.step_count >= self.max_steps
+
         # --- STRUCTURAL METRICS LOGGING (no reward impact) ---
         # Compute structural metrics every N steps for monitoring
         structural_metrics = {}
@@ -370,10 +374,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 "ti_o_bonds_fraction": ti_o_fraction,
                 "total_bonds": total_bonds,
             }
-
-        # Check termination conditions
-        terminated = False  # Define a success condition, e.g., target thickness
-        truncated = self.step_count >= self.max_steps
 
         # Prepare info dict
         if is_deposition_action:
