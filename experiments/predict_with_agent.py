@@ -58,19 +58,27 @@ class PredictionResults:
         self.output_dir = Path(__file__).parent / "results" / "predict" / self.timestamp
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Time series data
-        self.steps = []
-        self.roughnesses = []
-        self.coverages = []
-        self.rewards = []
-        self.n_ti_list = []
-        self.n_o_list = []
-        self.n_agents_list = []
+        # Create subdirectories immediately
+        self.snapshots_dir = self.output_dir / "snapshots"
+        self.snapshots_dir.mkdir(exist_ok=True)
+        self.gwyddion_dir = self.output_dir / "gwyddion"
+        self.gwyddion_dir.mkdir(exist_ok=True)
+
+        # Open CSV file for incremental writing
+        self.csv_path = self.output_dir / "timeseries.csv"
+        self.csv_file = open(self.csv_path, 'w', newline='', buffering=1)  # Line buffered
+        self.csv_writer = None  # Will be initialized on first write
         
-        # Scaling analysis data
-        self.fractal_dims = []
-        self.alpha_list = []
-        self.beta_list = []
+        # Keep minimal data in memory for final summary (last 100 points for plots)
+        self.recent_steps = []
+        self.recent_roughnesses = []
+        self.recent_rewards = []
+        self.max_recent = 100  # Keep last N points in memory
+        
+        # Counters for summary
+        self.total_steps = 0
+        self.sum_rewards = 0.0
+        self.final_metrics = {}  # Will store last step metrics
 
         # Action statistics
         self.action_counts = {
@@ -85,64 +93,144 @@ class PredictionResults:
             "DESORB": 0,
         }
 
-        # Snapshots for visualization
-        self.height_profiles = []
-        self.snapshot_steps = []
+        # Snapshot tracking
+        self.snapshot_interval = None  # Will be set based on max_steps
+        self.next_snapshot_step = 0
+        self.snapshot_count = 0
+        
+        # Lattice constant for physical units
+        self.lattice_constant = 4.59  # Angstroms
+
+    def __del__(self):
+        """Cleanup: ensure CSV file is closed."""
+        if hasattr(self, 'csv_file') and self.csv_file and not self.csv_file.closed:
+            self.csv_file.close()
 
     def record_step(self, step: int, env: AgentBasedTiO2Env, reward: float, action_str: str):
-        """Record metrics for current step."""
-        self.steps.append(step)
+        """Record metrics for current step - writes immediately to CSV."""
+        # Calculate metrics
         roughness = env._calculate_roughness()
-        self.roughnesses.append(roughness)
-        self.coverages.append(env._calculate_coverage())
-        self.rewards.append(reward)
-        self.n_ti_list.append(env._count_species(SpeciesType.TI))
-        self.n_o_list.append(env._count_species(SpeciesType.O))
-        self.n_agents_list.append(len(env.agents))
-
+        coverage = env._calculate_coverage()
+        n_ti = env._count_species(SpeciesType.TI)
+        n_o = env._count_species(SpeciesType.O)
+        n_agents = len(env.agents)
+        
+        # Calculate fractal dimension
+        height_profile = env.lattice.get_height_profile()
+        try:
+            fractal_dim = float(calculate_fractal_dimension(height_profile))
+        except Exception:
+            fractal_dim = None
+        
+        # Calculate scaling exponents if we have enough recent data
+        alpha, beta = None, None
+        if len(self.recent_steps) >= 5:
+            try:
+                from src.analysis import fit_family_vicsek
+                steps_array = np.array(self.recent_steps, dtype=float)
+                roughnesses_array = np.array(self.recent_roughnesses)
+                system_size = float(np.sqrt(CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]))
+                scaling = fit_family_vicsek(steps_array, roughnesses_array, system_size)
+                alpha = float(scaling["alpha"])
+                beta = float(scaling["beta"])
+            except Exception:
+                pass
+        
+        # Write to CSV immediately
+        row = {
+            "step": step,
+            "roughness": roughness,
+            "coverage": coverage,
+            "reward": reward,
+            "n_ti": n_ti,
+            "n_o": n_o,
+            "n_agents": n_agents,
+            "fractal_dimension": fractal_dim if fractal_dim is not None else "",
+            "alpha": alpha if alpha is not None else "",
+            "beta": beta if beta is not None else "",
+        }
+        
+        if self.csv_writer is None:
+            # Initialize CSV writer with header
+            import csv
+            self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=row.keys())
+            self.csv_writer.writeheader()
+        
+        self.csv_writer.writerow(row)
+        
+        # Update counters and final metrics
+        self.total_steps = step + 1
+        self.sum_rewards += reward
+        self.final_metrics = {
+            "final_roughness": roughness,
+            "final_coverage": coverage,
+            "final_n_ti": n_ti,
+            "final_n_o": n_o,
+            "final_n_agents": n_agents,
+            "final_fractal_dimension": fractal_dim,
+            "final_alpha": alpha,
+            "final_beta": beta,
+        }
+        
+        # Keep recent data in memory (rolling window)
+        self.recent_steps.append(step)
+        self.recent_roughnesses.append(roughness)
+        self.recent_rewards.append(reward)
+        if len(self.recent_steps) > self.max_recent:
+            self.recent_steps.pop(0)
+            self.recent_roughnesses.pop(0)
+            self.recent_rewards.pop(0)
+        
         # Count actions
         if action_str in self.action_counts:
             self.action_counts[action_str] += 1
+        
+        # Save snapshot if it's time (and GSF immediately)
+        if self.snapshot_interval is None:
+            self.snapshot_interval = max(1, CONFIG["max_steps"] // CONFIG["n_snapshots"])
+            self.next_snapshot_step = 0
+        
+        if step >= self.next_snapshot_step and self.snapshot_count < CONFIG["n_snapshots"]:
+            self._save_snapshot_immediately(step, height_profile, roughness, coverage)
+            self.snapshot_count += 1
+            self.next_snapshot_step += self.snapshot_interval
 
-        # Calculate fractal dimension at this step
-        try:
-            height_profile = env.lattice.get_height_profile()
-            fractal_dim = float(calculate_fractal_dimension(height_profile))
-            self.fractal_dims.append(fractal_dim)
-        except Exception:
-            self.fractal_dims.append(None)
+    def _save_snapshot_immediately(self, step: int, height_profile, roughness: float, coverage: float):
+        """Save snapshot image and GSF file immediately."""
+        # Save GSF file for Gwyddion
+        self._export_to_gsf(
+            height_profile,
+            self.gwyddion_dir / f"snapshot_{step:06d}.gsf",
+            self.lattice_constant,
+            step,
+            roughness,
+            coverage
+        )
+        
+        # Save PNG snapshot
+        fig, ax = plt.subplots(figsize=(8, 7))
+        im = ax.imshow(height_profile, cmap="viridis", interpolation="nearest")
+        ax.set_xlabel("X", fontsize=11)
+        ax.set_ylabel("Y", fontsize=11)
+        ax.set_title(
+            f"Step {step}: R={roughness:.2f}Å, θ={coverage:.3f}",
+            fontsize=12,
+            fontweight="bold",
+        )
+        plt.colorbar(im, ax=ax, label="Height (layers)")
+        plt.tight_layout()
+        plt.savefig(self.snapshots_dir / f"snapshot_{step:06d}.png", dpi=120)
+        plt.close()
 
-        # Calculate scaling exponents if we have enough data
-        if len(self.steps) >= 5 and len(self.roughnesses) >= 5:
-            try:
-                from src.analysis import fit_family_vicsek
-                steps_array = np.array(self.steps, dtype=float)
-                roughnesses_array = np.array(self.roughnesses)
-                system_size = float(np.sqrt(CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]))
-                scaling = fit_family_vicsek(steps_array, roughnesses_array, system_size)
-                self.alpha_list.append(float(scaling["alpha"]))
-                self.beta_list.append(float(scaling["beta"]))
-            except Exception:
-                self.alpha_list.append(None)
-                self.beta_list.append(None)
-        else:
-            self.alpha_list.append(None)
-            self.beta_list.append(None)
-
-        # Store snapshots at regular intervals
-        if len(self.height_profiles) < CONFIG["n_snapshots"]:
-            interval = max(1, CONFIG["max_steps"] // CONFIG["n_snapshots"])
-            if step % interval == 0 or step == CONFIG["max_steps"] - 1:
-                self.height_profiles.append(env.lattice.get_height_profile())
-                self.snapshot_steps.append(step)
-
-    def save_results(self):
-        """Save results to JSON and CSV formats."""
-        # Get final values
-        final_alpha = self.alpha_list[-1] if self.alpha_list and self.alpha_list[-1] is not None else None
-        final_beta = self.beta_list[-1] if self.beta_list and self.beta_list[-1] is not None else None
-        final_fractal = self.fractal_dims[-1] if self.fractal_dims and self.fractal_dims[-1] is not None else None
-
+    def save_final_summary(self):
+        """Save final JSON summary after simulation completes."""
+        # Close CSV file
+        if self.csv_file:
+            self.csv_file.close()
+        
+        # Calculate summary statistics
+        mean_reward = self.sum_rewards / self.total_steps if self.total_steps > 0 else 0.0
+        
         results = {
             "config": {
                 "model_path": str(self.model_path),
@@ -154,61 +242,48 @@ class PredictionResults:
                 "seed": CONFIG["torch_seed"],
                 "n_snapshots": CONFIG["n_snapshots"],
             },
-            "metrics": {
-                "steps": self.steps,
-                "roughnesses": self.roughnesses,
-                "coverages": self.coverages,
-                "rewards": self.rewards,
-                "n_ti": self.n_ti_list,
-                "n_o": self.n_o_list,
-                "n_agents": self.n_agents_list,
-                "fractal_dimensions": self.fractal_dims,
-                "alpha": self.alpha_list,
-                "beta": self.beta_list,
-            },
             "action_counts": self.action_counts,
             "final_metrics": {
-                "final_roughness": self.roughnesses[-1] if self.roughnesses else 0.0,
-                "final_coverage": self.coverages[-1] if self.coverages else 0.0,
-                "total_reward": sum(self.rewards),
-                "mean_reward": np.mean(self.rewards) if self.rewards else 0.0,
-                "final_n_ti": self.n_ti_list[-1] if self.n_ti_list else 0,
-                "final_n_o": self.n_o_list[-1] if self.n_o_list else 0,
-                "final_fractal_dimension": final_fractal,
-                "final_alpha": final_alpha,
-                "final_beta": final_beta,
+                **self.final_metrics,
+                "total_reward": self.sum_rewards,
+                "mean_reward": mean_reward,
+                "total_steps": self.total_steps,
             },
+            "data_files": {
+                "timeseries_csv": str(self.csv_path),
+                "snapshots_dir": str(self.snapshots_dir),
+                "gwyddion_dir": str(self.gwyddion_dir),
+            }
         }
 
-        # Save JSON
+        # Save JSON summary
         with open(self.output_dir / "results.json", "w") as f:
             json.dump(results, f, indent=2)
 
-        # Save CSV for easy import into Origin/MATLAB/Excel
-        df = pd.DataFrame({
-            "step": self.steps,
-            "roughness": self.roughnesses,
-            "coverage": self.coverages,
-            "reward": self.rewards,
-            "n_ti": self.n_ti_list,
-            "n_o": self.n_o_list,
-            "n_agents": self.n_agents_list,
-            "fractal_dimension": self.fractal_dims,
-            "alpha": self.alpha_list,
-            "beta": self.beta_list,
-        })
-        df.to_csv(self.output_dir / "timeseries.csv", index=False)
-
-        logger.info(f"Results saved to {self.output_dir / 'results.json'}")
-        logger.info(f"Time series data saved to {self.output_dir / 'timeseries.csv'}")
+        logger.info(f"Final summary saved to {self.output_dir / 'results.json'}")
+        logger.info(f"Time series data: {self.csv_path}")
+        logger.info("Snapshots saved incrementally during execution")
 
     def generate_plots(self, env: AgentBasedTiO2Env):
-        """Generate all visualization plots in multiple formats."""
-        logger.info("Generating plots...")
+        """Generate all visualization plots in multiple formats - reads from saved CSV."""
+        logger.info("Generating plots from saved data...")
+        
+        # Load data from CSV
+        df = pd.read_csv(self.csv_path)
+        steps = df["step"].values
+        roughnesses = df["roughness"].values
+        coverages = df["coverage"].values
+        rewards = df["reward"].values
+        n_ti_list = df["n_ti"].values
+        n_o_list = df["n_o"].values
+        n_agents_list = df["n_agents"].values  # noqa: F841 - may be used in future plots
+        fractal_dims = df["fractal_dimension"].replace("", np.nan).values
+        alpha_list = df["alpha"].replace("", np.nan).values
+        beta_list = df["beta"].replace("", np.nan).values
 
         # Plot 1: Roughness evolution
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(self.steps, self.roughnesses, "b-", linewidth=2)
+        ax.plot(steps, roughnesses, "b-", linewidth=2)
         ax.set_xlabel("Step", fontsize=12)
         ax.set_ylabel("Roughness (Å)", fontsize=12)
         ax.set_title("Surface Roughness Evolution", fontsize=14, fontweight="bold")
@@ -223,15 +298,15 @@ class PredictionResults:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
 
         # Coverage
-        ax1.plot(self.steps, self.coverages, "g-", linewidth=2)
+        ax1.plot(steps, coverages, "g-", linewidth=2)
         ax1.set_xlabel("Step", fontsize=12)
         ax1.set_ylabel("Coverage", fontsize=12)
         ax1.set_title("Surface Coverage", fontsize=14, fontweight="bold")
         ax1.grid(True, alpha=0.3)
 
         # Composition
-        ax2.plot(self.steps, self.n_ti_list, "r-", linewidth=2, label="Ti atoms")
-        ax2.plot(self.steps, self.n_o_list, "b-", linewidth=2, label="O atoms")
+        ax2.plot(steps, n_ti_list, "r-", linewidth=2, label="Ti atoms")
+        ax2.plot(steps, n_o_list, "b-", linewidth=2, label="O atoms")
         ax2.set_xlabel("Step", fontsize=12)
         ax2.set_ylabel("Number of Atoms", fontsize=12)
         ax2.set_title("Composition Evolution", fontsize=14, fontweight="bold")
@@ -245,13 +320,13 @@ class PredictionResults:
 
         # Plot 3: Rewards
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(self.steps, self.rewards, "purple", linewidth=1, alpha=0.7)
+        ax.plot(steps, rewards, "purple", linewidth=1, alpha=0.7)
         # Add moving average
-        window = min(50, len(self.rewards) // 10)
+        window = min(50, len(rewards) // 10)
         if window > 1:
-            moving_avg = np.convolve(self.rewards, np.ones(window) / window, mode="valid")
+            moving_avg = np.convolve(rewards, np.ones(window) / window, mode="valid")
             ax.plot(
-                self.steps[window - 1 :],
+                steps[window - 1 :],
                 moving_avg,
                 "r-",
                 linewidth=2,
@@ -307,9 +382,9 @@ class PredictionResults:
         plt.close()
 
         # Plot 6: Scaling analysis (log-log)
-        if len(self.steps) > 10:
+        if len(steps) > 10:
             fig, ax = plt.subplots(figsize=(10, 6))
-            ax.loglog(self.steps, self.roughnesses, "bo-", linewidth=2, markersize=4, label="Data")
+            ax.loglog(steps, roughnesses, "bo-", linewidth=2, markersize=4, label="Data")
             ax.set_xlabel("Step", fontsize=12)
             ax.set_ylabel("Roughness (Å)", fontsize=12)
             ax.set_title("Dynamic Scaling Analysis (Log-Log)", fontsize=14, fontweight="bold")
@@ -321,13 +396,13 @@ class PredictionResults:
             plt.close()
 
         # Plot 7: Scaling exponents evolution (α, β)
-        if len(self.alpha_list) > 0:
-            valid_indices = [i for i, a in enumerate(self.alpha_list) if a is not None]
-            if valid_indices:
-                valid_steps = [self.steps[i] for i in valid_indices]
-                valid_alpha = [self.alpha_list[i] for i in valid_indices]
-                valid_beta = [self.beta_list[i] for i in valid_indices]
+        valid_mask = ~np.isnan(alpha_list)
+        if valid_mask.any():
+            valid_steps = steps[valid_mask]
+            valid_alpha = alpha_list[valid_mask]
+            valid_beta = beta_list[valid_mask]
 
+            if len(valid_steps) > 0:
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
 
                 # Alpha evolution
@@ -356,30 +431,26 @@ class PredictionResults:
                 plt.close()
 
         # Plot 8: Fractal dimension evolution
-        if len(self.fractal_dims) > 0:
-            valid_indices = [i for i, f in enumerate(self.fractal_dims) if f is not None]
-            if valid_indices:
-                valid_steps = [self.steps[i] for i in valid_indices]
-                valid_fractal = [self.fractal_dims[i] for i in valid_indices]
+        fractal_mask = ~np.isnan(fractal_dims)
+        if fractal_mask.any():
+            valid_steps_f = steps[fractal_mask]
+            valid_fractal = fractal_dims[fractal_mask]
 
-                fig, ax = plt.subplots(figsize=(10, 6))
-                ax.plot(valid_steps, valid_fractal, "go-", linewidth=2, markersize=4)
-                ax.axhline(y=2.0, color='k', linestyle='--', alpha=0.3, label="D=2.0 (flat)")
-                ax.axhline(y=2.5, color='b', linestyle='--', alpha=0.3, label="D=2.5 (typical rough)")
-                ax.set_xlabel("Step", fontsize=12)
-                ax.set_ylabel("Fractal Dimension", fontsize=12)
-                ax.set_title("Fractal Dimension Evolution", fontsize=14, fontweight="bold")
-                ax.grid(True, alpha=0.3)
-                ax.legend()
-                plt.tight_layout()
-                for fmt in ["png", "svg", "pdf"]:
-                    plt.savefig(self.output_dir / f"plot_08_fractal_dimension.{fmt}", dpi=150 if fmt == "png" else None)
-                plt.close()
-
-        # Generate snapshot frames
-        self._generate_snapshot_frames()
-
-        logger.info(f"All plots saved to {self.output_dir} (PNG, SVG, PDF)")
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.plot(valid_steps_f, valid_fractal, "go-", linewidth=2, markersize=4)
+            ax.axhline(y=2.0, color='k', linestyle='--', alpha=0.3, label="D=2.0 (flat)")
+            ax.axhline(y=2.5, color='b', linestyle='--', alpha=0.3, label="D=2.5 (typical rough)")
+            ax.set_xlabel("Step", fontsize=12)
+            ax.set_ylabel("Fractal Dimension", fontsize=12)
+            ax.set_title("Fractal Dimension Evolution", fontsize=14, fontweight="bold")
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            plt.tight_layout()
+            for fmt in ["png", "svg", "pdf"]:
+                plt.savefig(self.output_dir / f"plot_08_fractal_dimension.{fmt}", dpi=150 if fmt == "png" else None)
+            plt.close()
+        
+        logger.info(f"All plots generated and saved to {self.output_dir}")
 
     def _export_to_gsf(self, height_profile, output_path, lattice_constant, step, roughness, coverage):
         """
@@ -426,59 +497,6 @@ ZUnits = Angstrom
             height_flat = height_angstrom.astype('<f4').tobytes()
             f.write(height_flat)
 
-    def _generate_snapshot_frames(self):
-        """Generate individual frames for movie creation."""
-        logger.info(f"Generating {len(self.height_profiles)} snapshot frames...")
-
-        snapshots_dir = self.output_dir / "snapshots"
-        snapshots_dir.mkdir(exist_ok=True)
-
-        # Create gwyddion directory for GSF files
-        gwyddion_dir = self.output_dir / "gwyddion"
-        gwyddion_dir.mkdir(exist_ok=True)
-
-        # Lattice constant for TiO2 rutile
-        lattice_constant = 4.59  # Angstroms
-
-        # Find global min/max for consistent colorbar
-        all_heights = np.concatenate([h.flatten() for h in self.height_profiles])
-        vmin, vmax = float(all_heights.min()), float(all_heights.max())
-
-        for i, height_profile in enumerate(self.height_profiles):
-            step = self.snapshot_steps[i]
-            # Find the index in the full data arrays corresponding to this step
-            step_idx = self.steps.index(step) if step in self.steps else i
-            roughness = self.roughnesses[step_idx] if step_idx < len(self.roughnesses) else 0.0
-            coverage = self.coverages[step_idx] if step_idx < len(self.coverages) else 0.0
-
-            # Export to GSF format for Gwyddion
-            self._export_to_gsf(
-                height_profile,
-                gwyddion_dir / f"snapshot_{step:06d}.gsf",
-                lattice_constant,
-                step,
-                roughness,
-                coverage
-            )
-
-            # Create PNG snapshot
-            fig, ax = plt.subplots(figsize=(8, 7))
-            im = ax.imshow(height_profile, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
-            ax.set_xlabel("X", fontsize=11)
-            ax.set_ylabel("Y", fontsize=11)
-            ax.set_title(
-                f"Step {step}: R={roughness:.2f}Å, θ={coverage:.3f}",
-                fontsize=12,
-                fontweight="bold",
-            )
-            plt.colorbar(im, ax=ax, label="Height (layers)")
-            plt.tight_layout()
-            plt.savefig(snapshots_dir / f"snapshot_{step:06d}.png", dpi=120)
-            plt.close()
-
-        logger.info(f"Snapshots saved to {snapshots_dir}")
-        logger.info(f"GSF files (Gwyddion) saved to {gwyddion_dir}")
-
 
 def load_model(model_path: Path, obs_dim: int, action_dim: int, global_obs_dim: int, device):
     """Load trained actor and critic models."""
@@ -487,7 +505,7 @@ def load_model(model_path: Path, obs_dim: int, action_dim: int, global_obs_dim: 
     actor = Actor(obs_dim=obs_dim, action_dim=action_dim).to(device)
     critic = Critic(obs_dim=global_obs_dim).to(device)
 
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     actor.load_state_dict(checkpoint["actor_state_dict"])
     critic.load_state_dict(checkpoint["critic_state_dict"])
 
@@ -555,7 +573,6 @@ def run_prediction(model_path: str):
 
         # Get observations
         agent_obs = obs["agent_observations"]
-        global_obs = obs["global_features"]
         num_agents = len(agent_obs)
 
         # Decentralized Actor Action Selection (same logic as training)
@@ -622,14 +639,14 @@ def run_prediction(model_path: str):
 
     logger.info("=" * 80)
     logger.info(f"Simulation completed in {duration:.2f}s ({sps:.1f} steps/s)")
-    logger.info(f"Final roughness: {results.roughnesses[-1]:.4f} nm")
-    logger.info(f"Final coverage: {results.coverages[-1]:.4f}")
-    logger.info(f"Total reward: {sum(results.rewards):.2f} eV")
-    logger.info(f"Mean reward: {np.mean(results.rewards):.4f} eV")
+    logger.info(f"Final roughness: {results.final_metrics.get('final_roughness', 0):.4f} Å")
+    logger.info(f"Final coverage: {results.final_metrics.get('final_coverage', 0):.4f}")
+    logger.info(f"Total reward: {results.sum_rewards:.2f} eV")
+    logger.info(f"Mean reward: {results.sum_rewards / results.total_steps:.4f} eV")
     logger.info("=" * 80)
 
-    # Save and visualize
-    results.save_results()
+    # Save final summary and generate plots from saved data
+    results.save_final_summary()
     results.generate_plots(env)
 
     logger.info(f"All results saved to {results.output_dir}")

@@ -37,7 +37,7 @@ ENV_CONFIG = {
     # Episode configuration
     "max_steps_per_episode": 3000,  # Longer episodes for larger system equilibration
     # Random seed for reproducibility
-    "seed": 42,
+    "seed": 4242,
 }
 
 # ============================================================================
@@ -106,7 +106,7 @@ REWARD_SHAPING_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 1e-4,  # Reduced for stable learning without catastrophic forgetting
+    "learning_rate": 1e-5,  # Reduced for stable learning without catastrophic forgetting
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -117,11 +117,11 @@ PPO_CONFIG = {
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.05,  # Entropy bonus - Reduced from 0.3 to prevent over-exploration
+    "ent_coef": 0.01,  # Entropy bonus - Very low to allow policy convergence (was 0.2 - too high)
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
-    "update_epochs": 6,  # Number of epochs per PPO update (increased for better policy correction)
+    "update_epochs": 2,  # Number of epochs per PPO update (increased for better policy correction)
 }
 
 # ============================================================================
@@ -144,7 +144,7 @@ TRAINING_CONFIG = {
     "eval_frequency": 25,  # Run evaluation every N updates
     "eval_episodes": 5,  # Number of episodes for evaluation
     # Logging
-    "log_frequency": 10,  # Log metrics every N updates
+    "log_frequency": 5,  # Log metrics every N updates
     "tensorboard_enabled": True,
     "save_trajectories": True,  # Save full trajectories for analysis
 }
