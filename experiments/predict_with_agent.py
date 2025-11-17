@@ -68,13 +68,13 @@ class PredictionResults:
         self.csv_path = self.output_dir / "timeseries.csv"
         self.csv_file = open(self.csv_path, 'w', newline='', buffering=1)  # Line buffered
         self.csv_writer = None  # Will be initialized on first write
-        
+
         # Keep minimal data in memory for final summary (last 100 points for plots)
         self.recent_steps = []
         self.recent_roughnesses = []
         self.recent_rewards = []
         self.max_recent = 100  # Keep last N points in memory
-        
+
         # Counters for summary
         self.total_steps = 0
         self.sum_rewards = 0.0
@@ -97,7 +97,7 @@ class PredictionResults:
         self.snapshot_interval = None  # Will be set based on max_steps
         self.next_snapshot_step = 0
         self.snapshot_count = 0
-        
+
         # Lattice constant for physical units
         self.lattice_constant = 4.59  # Angstroms
 
@@ -114,14 +114,14 @@ class PredictionResults:
         n_ti = env._count_species(SpeciesType.TI)
         n_o = env._count_species(SpeciesType.O)
         n_agents = len(env.agents)
-        
+
         # Calculate fractal dimension
         height_profile = env.lattice.get_height_profile()
         try:
             fractal_dim = float(calculate_fractal_dimension(height_profile))
         except Exception:
             fractal_dim = None
-        
+
         # Calculate scaling exponents if we have enough recent data
         alpha, beta = None, None
         if len(self.recent_steps) >= 5:
@@ -135,7 +135,7 @@ class PredictionResults:
                 beta = float(scaling["beta"])
             except Exception:
                 pass
-        
+
         # Write to CSV immediately
         row = {
             "step": step,
@@ -149,15 +149,15 @@ class PredictionResults:
             "alpha": alpha if alpha is not None else "",
             "beta": beta if beta is not None else "",
         }
-        
+
         if self.csv_writer is None:
             # Initialize CSV writer with header
             import csv
             self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=row.keys())
             self.csv_writer.writeheader()
-        
+
         self.csv_writer.writerow(row)
-        
+
         # Update counters and final metrics
         self.total_steps = step + 1
         self.sum_rewards += reward
@@ -171,7 +171,7 @@ class PredictionResults:
             "final_alpha": alpha,
             "final_beta": beta,
         }
-        
+
         # Keep recent data in memory (rolling window)
         self.recent_steps.append(step)
         self.recent_roughnesses.append(roughness)
@@ -180,16 +180,16 @@ class PredictionResults:
             self.recent_steps.pop(0)
             self.recent_roughnesses.pop(0)
             self.recent_rewards.pop(0)
-        
+
         # Count actions
         if action_str in self.action_counts:
             self.action_counts[action_str] += 1
-        
+
         # Save snapshot if it's time (and GSF immediately)
         if self.snapshot_interval is None:
             self.snapshot_interval = max(1, CONFIG["max_steps"] // CONFIG["n_snapshots"])
             self.next_snapshot_step = 0
-        
+
         if step >= self.next_snapshot_step and self.snapshot_count < CONFIG["n_snapshots"]:
             self._save_snapshot_immediately(step, height_profile, roughness, coverage)
             self.snapshot_count += 1
@@ -206,7 +206,7 @@ class PredictionResults:
             roughness,
             coverage
         )
-        
+
         # Save PNG snapshot
         fig, ax = plt.subplots(figsize=(8, 7))
         im = ax.imshow(height_profile, cmap="viridis", interpolation="nearest")
@@ -227,10 +227,10 @@ class PredictionResults:
         # Close CSV file
         if self.csv_file:
             self.csv_file.close()
-        
+
         # Calculate summary statistics
         mean_reward = self.sum_rewards / self.total_steps if self.total_steps > 0 else 0.0
-        
+
         results = {
             "config": {
                 "model_path": str(self.model_path),
@@ -267,7 +267,7 @@ class PredictionResults:
     def generate_plots(self, env: AgentBasedTiO2Env):
         """Generate all visualization plots in multiple formats - reads from saved CSV."""
         logger.info("Generating plots from saved data...")
-        
+
         # Load data from CSV
         df = pd.read_csv(self.csv_path)
         steps = df["step"].values
@@ -449,7 +449,7 @@ class PredictionResults:
             for fmt in ["png", "svg", "pdf"]:
                 plt.savefig(self.output_dir / f"plot_08_fractal_dimension.{fmt}", dpi=150 if fmt == "png" else None)
             plt.close()
-        
+
         logger.info(f"All plots generated and saved to {self.output_dir}")
 
     def _export_to_gsf(self, height_profile, output_path, lattice_constant, step, roughness, coverage):

@@ -291,8 +291,12 @@ class ParticleAgent:
         for action, (dx, dy, dz) in action_offsets.items():
             nx_pos, ny_pos, nz_pos = x + dx, y + dy, z + dz
 
-            # Check boundaries (no periodic boundary in z)
-            if 0 <= nx_pos < nx and 0 <= ny_pos < ny and 0 <= nz_pos < lattice_size[2]:
+            # Apply periodic boundary conditions in x and y (but not z)
+            nx_pos = nx_pos % nx
+            ny_pos = ny_pos % ny
+
+            # Check z boundary only (no periodic boundary in z)
+            if 0 <= nz_pos < lattice_size[2]:
                 neighbor_idx = nx_pos + ny_pos * nx + nz_pos * nx * ny
                 neighbors[action] = neighbor_idx
 
