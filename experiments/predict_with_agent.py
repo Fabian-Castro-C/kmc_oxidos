@@ -544,13 +544,17 @@ def run_prediction(model_path: str):
         seed=CONFIG["torch_seed"],
     )
 
-    # Calculate deposition logits (same formula as training)
+    # Calculate deposition probability (same formula as training - probabilistic, not competitive)
     n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
-    deposition_logit_ti = torch.tensor(np.log(CONFIG["deposition_flux_ti"] * n_sites)).to(device)
-    deposition_logit_o = torch.tensor(np.log(CONFIG["deposition_flux_o"] * n_sites)).to(device)
+    delta_t = 0.01  # Same timestep as training
+    lambda_ti = CONFIG["deposition_flux_ti"] * n_sites * delta_t
+    lambda_o = CONFIG["deposition_flux_o"] * n_sites * delta_t
+    lambda_total = lambda_ti + lambda_o
+    p_deposit = 1.0 - np.exp(-lambda_total)
+    p_ti = lambda_ti / lambda_total if lambda_total > 0 else 0.5  # Relative probability of Ti vs O
 
-    logger.info(f"Calculated Deposition Logit (Ti): {deposition_logit_ti.item():.4f}")
-    logger.info(f"Calculated Deposition Logit (O): {deposition_logit_o.item():.4f}")
+    logger.info(f"Deposition params: lambda_Ti={lambda_ti:.3f}, lambda_O={lambda_o:.3f}, P(deposit)={p_deposit:.1%}")
+    logger.info(f"Expected: ~{int(p_deposit * CONFIG['max_steps'])} depositions, ~{int((1 - p_deposit) * CONFIG['max_steps'])} agent actions")
 
     # Load model
     obs_dim = env.single_agent_observation_space.shape[0]
@@ -575,55 +579,48 @@ def run_prediction(model_path: str):
         agent_obs = obs["agent_observations"]
         num_agents = len(agent_obs)
 
-        # Decentralized Actor Action Selection (same logic as training)
+        # Decide between DEPOSITION (external event) or AGENT ACTION (probabilistic, same as training)
         with torch.no_grad():
-            if num_agents > 0:
-                obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
-                diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
-
-                # Get and apply the action mask
-                action_mask = env.get_action_mask()
-                action_mask_tensor = torch.from_numpy(action_mask).to(device)
-                diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
-
-                # Flatten diffusion logits and combine with the fixed deposition logits
-                all_possible_logits = torch.cat(
-                    [
-                        diffusion_logits.flatten(),
-                        deposition_logit_ti.unsqueeze(0),
-                        deposition_logit_o.unsqueeze(0),
-                    ]
-                )
+            # Roll the dice: does a deposition occur this step?
+            if np.random.random() < p_deposit:
+                # DEPOSITION EVENT
+                # Choose species based on relative fluxes
+                if np.random.random() < p_ti:
+                    action = "DEPOSIT_TI"
+                    action_str = "DEPOSIT_TI"
+                else:
+                    action = "DEPOSIT_O"
+                    action_str = "DEPOSIT_O"
             else:
-                # No agents, so no diffusion actions to mask
-                # Only deposition is possible
-                all_possible_logits = torch.cat(
-                    [deposition_logit_ti.unsqueeze(0), deposition_logit_o.unsqueeze(0)]
-                )
+                # AGENT ACTION (if agents exist)
+                if num_agents > 0:
+                    obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
+                    diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
 
-        # Gumbel-Max for global action selection across all possibilities
-        gumbel_action_idx, _log_prob = select_action_gumbel_max(all_possible_logits)
+                    # Get and apply the action mask
+                    action_mask = env.get_action_mask()
+                    action_mask_tensor = torch.from_numpy(action_mask).to(device)
+                    diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
 
-        # Deconstruct the chosen action
-        diffusion_action_space_size = num_agents * action_dim
-        if gumbel_action_idx < diffusion_action_space_size:
-            # It's a diffusion action
-            agent_idx = gumbel_action_idx // action_dim
-            action_idx = gumbel_action_idx % action_dim
-            action = (agent_idx, action_idx)
-            action_str = (
-                f"DIFFUSE_{['X_POS', 'X_NEG', 'Y_POS', 'Y_NEG', 'Z_POS', 'Z_NEG'][action_idx]}"
-                if action_idx < 6
-                else "DESORB"
-            )
-        elif gumbel_action_idx == diffusion_action_space_size:
-            # It's a Ti deposition action
-            action = "DEPOSIT_TI"
-            action_str = "DEPOSIT_TI"
-        else:
-            # It's an O deposition action
-            action = "DEPOSIT_O"
-            action_str = "DEPOSIT_O"
+                    # Flatten diffusion logits for Gumbel-Max selection
+                    all_possible_logits = diffusion_logits.flatten()
+
+                    # Gumbel-Max for action selection
+                    gumbel_action_idx, _log_prob = select_action_gumbel_max(all_possible_logits)
+
+                    # Deconstruct the chosen action
+                    agent_idx = gumbel_action_idx // action_dim
+                    action_idx = gumbel_action_idx % action_dim
+                    action = (agent_idx, action_idx)
+                    action_str = (
+                        f"DIFFUSE_{['X_POS', 'X_NEG', 'Y_POS', 'Y_NEG', 'Z_POS', 'Z_NEG'][action_idx]}"
+                        if action_idx < 6
+                        else "DESORB"
+                    )
+                else:
+                    # No agents: force deposition to bootstrap
+                    action = "DEPOSIT_TI" if np.random.random() < 0.5 else "DEPOSIT_O"
+                    action_str = action
 
         # Execute action
         obs, reward, terminated, truncated, info = env.step(action)
@@ -672,6 +669,12 @@ def main():
     parser.add_argument("--steps", type=int, default=None, help="Number of simulation steps. Default from CONFIG.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed. Default from CONFIG.")
     parser.add_argument("--snapshots", type=int, default=None, help="Number of snapshots to save. Default from CONFIG.")
+    parser.add_argument(
+        "--flux-ti", type=float, default=None, help="Ti deposition flux (ML/s). Default from CONFIG."
+    )
+    parser.add_argument(
+        "--flux-o", type=float, default=None, help="O deposition flux (ML/s). Default from CONFIG."
+    )
 
     args = parser.parse_args()
 
@@ -686,6 +689,10 @@ def main():
         CONFIG["torch_seed"] = args.seed
     if args.snapshots is not None:
         CONFIG["n_snapshots"] = args.snapshots
+    if args.flux_ti is not None:
+        CONFIG["deposition_flux_ti"] = args.flux_ti
+    if args.flux_o is not None:
+        CONFIG["deposition_flux_o"] = args.flux_o
 
     try:
         run_prediction(args.model)

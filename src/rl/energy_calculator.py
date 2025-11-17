@@ -153,8 +153,14 @@ class SystemEnergyCalculator:
         total_bond_energy = self.calculate_system_energy(lattice)
 
         # N: Number of particles of each species
-        n_ti = sum(1 for site in lattice.sites if site.species == SpeciesType.TI)
-        n_o = sum(1 for site in lattice.sites if site.species == SpeciesType.O)
+        # Use cached species counts from lattice if available (O(1) instead of O(N))
+        if hasattr(lattice, '_species_counts_cache'):
+            n_ti = lattice._species_counts_cache.get(SpeciesType.TI, 0)
+            n_o = lattice._species_counts_cache.get(SpeciesType.O, 0)
+        else:
+            # Fallback: O(N) iteration (only if cache not available)
+            n_ti = sum(1 for site in lattice.sites if site.species == SpeciesType.TI)
+            n_o = sum(1 for site in lattice.sites if site.species == SpeciesType.O)
 
         # µN term
         mu_n_term = self.mu_ti * n_ti + self.mu_o * n_o
