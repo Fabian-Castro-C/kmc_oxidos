@@ -15,9 +15,9 @@ from pathlib import Path
 # ============================================================================
 # EXPERIMENT IDENTIFICATION
 # ============================================================================
-RUN_NAME = f"runpod_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-PROJECT_NAME = "TiO2_SwarmThinking_Production"
-DESCRIPTION = "Production training run with SwarmThinkers architecture for TiO2 growth optimization"
+RUN_NAME = f"runpod_finetune_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+PROJECT_NAME = "TiO2_SwarmThinking_FineTuning"
+DESCRIPTION = "Fine-tuning with reduced flux and lower LR for kinetic regime optimization"
 
 # ============================================================================
 # ENVIRONMENT CONFIGURATION
@@ -70,7 +70,7 @@ FLUX_SCHEDULE_CONFIG = {
     #   ~1 deposition every 20 steps
     #
     "flux_stages": [
-        {"at_update": 0, "flux_ti": 0.1, "flux_o": 0.2},
+        {"at_update": 0, "flux_ti": 0.05, "flux_o": 0.1},  # Reduced flux for more agent control
     ],
 }
 
@@ -106,7 +106,7 @@ REWARD_SHAPING_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 1e-5,  # Reduced for stable learning without catastrophic forgetting
+    "learning_rate": 1e-6,  # Fine-tuning: 1/3 of original for careful adjustments
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -129,13 +129,13 @@ PPO_CONFIG = {
 # ============================================================================
 TRAINING_CONFIG = {
     # Total training budget
-    "total_timesteps": 2_000_000,  # Increased for more learning on the small lattice
+    "total_timesteps": 1_000_000,  # Fine-tuning: shorter run to refine policy
     # Rollout collection
     "num_steps": 2048,  # Steps per rollout (standard PPO value)
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
-    "resume_from_checkpoint": None,  # Training from scratch with aggressive exploration
+    "resume_from_checkpoint": "experiments/results/train/runpod_20251117_061812/models/best_model.pt",  # Fine-tuning from best model (Actor Reward: 0.2558)
     # --- END NEW ---
     # Checkpointing
     "checkpoint_frequency": 50,  # Save checkpoint every N updates
@@ -217,7 +217,7 @@ PATHS_CONFIG = {
 CONVERGENCE_CONFIG = {
     # Early stopping criteria
     "enable_early_stopping": True,
-    "patience": 50,  # Stop if no improvement for N evaluations
+    "patience": 100,  # Fine-tuning: more patience for convergence
     "min_delta": 0.01,  # Minimum improvement to reset patience
     # Success criteria (optional)
     "target_mean_reward": 5.0,  # Stop if mean reward exceeds this
