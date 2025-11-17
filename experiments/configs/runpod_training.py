@@ -9,13 +9,13 @@ Usage:
     python experiments/train_scalable_agent.py --config experiments/configs/runpod_training.py
 """
 
-import time
+from datetime import datetime
 from pathlib import Path
 
 # ============================================================================
 # EXPERIMENT IDENTIFICATION
 # ============================================================================
-RUN_NAME = f"runpod_{int(time.time())}"
+RUN_NAME = f"runpod_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 PROJECT_NAME = "TiO2_SwarmThinking_Production"
 DESCRIPTION = "Production training run with SwarmThinkers architecture for TiO2 growth optimization"
 
