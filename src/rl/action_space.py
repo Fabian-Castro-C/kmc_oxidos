@@ -83,11 +83,13 @@ def create_action_mask(
     z = agent_positions // (lx * ly)
 
     # --- Diffusion Actions ---
-    # Check boundaries
-    mask[:, ActionType.DIFFUSE_X_POS.value] = x + 1 < lx
-    mask[:, ActionType.DIFFUSE_X_NEG.value] = x - 1 >= 0
-    mask[:, ActionType.DIFFUSE_Y_POS.value] = y + 1 < ly
-    mask[:, ActionType.DIFFUSE_Y_NEG.value] = y - 1 >= 0
+    # Check boundaries (X and Y are periodic, Z is not)
+    # X and Y: Always valid due to periodic boundary conditions
+    mask[:, ActionType.DIFFUSE_X_POS.value] = True  # Periodic in X
+    mask[:, ActionType.DIFFUSE_X_NEG.value] = True  # Periodic in X
+    mask[:, ActionType.DIFFUSE_Y_POS.value] = True  # Periodic in Y
+    mask[:, ActionType.DIFFUSE_Y_NEG.value] = True  # Periodic in Y
+    # Z: Hard boundaries (no periodicity in growth direction)
     mask[:, ActionType.DIFFUSE_Z_POS.value] = z + 1 < lz
     mask[:, ActionType.DIFFUSE_Z_NEG.value] = z - 1 >= 0
 
