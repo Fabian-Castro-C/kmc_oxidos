@@ -69,16 +69,22 @@ def train_gpu_swarm():
     
     optimizer = optim.Adam(list(actor.parameters()) + list(critic.parameters()), lr=DEFAULT_CONFIG["learning_rate"])
     
+    # TensorBoard
+    from torch.utils.tensorboard import SummaryWriter
+    writer = SummaryWriter(f"runs/gpu_swarm_{int(time.time())}")
+    
     # 3. Training Loop
     num_updates = args.total_timesteps // (args.num_envs * DEFAULT_CONFIG["num_steps"])
     print(f"Starting training: {num_updates} updates")
     
     start_time = time.time()
+    global_step = 0
     
     for update in range(num_updates):
         # Storage for rollout
-        batch_obs = []
-        batch_actions = []
+        # We store states (lattices) to save memory, and re-compute obs
+        batch_lattices = []
+        batch_actions = [] # Flat indices
         batch_logprobs = []
         batch_rewards = []
         batch_dones = []
@@ -86,76 +92,188 @@ def train_gpu_swarm():
         
         # --- Rollout Phase ---
         for step in range(DEFAULT_CONFIG["num_steps"]):
-            # 1. Prepare Observation for Actor
-            # Obs: (B, 51, X, Y, Z) -> Permute to (B, X, Y, Z, 51) -> Flatten to (N_sites, 51)
-            # We only want to run policy on OCCUPIED sites (Agents)
-            # But for FCN efficiency, we run on all and mask later
+            global_step += 1
             
+            # Store current state (clone to avoid reference issues)
+            batch_lattices.append(env.lattices.clone())
+            
+            # 1. Prepare Observation
+            # (B, 51, X, Y, Z)
+            obs = env._get_observations() 
             B, C, X, Y, Z = obs.shape
             flat_obs = obs.permute(0, 2, 3, 4, 1).reshape(-1, 51)
             
             with torch.no_grad():
                 logits = actor(flat_obs) # (B*X*Y*Z, N_ACTIONS)
-                values = critic(flat_obs) # (B*X*Y*Z, 1)
+                # Critic value: We need a single scalar per environment for PPO?
+                # Or per-agent?
+                # If we treat the whole lattice update as one step, we need one value per env.
+                # Let's aggregate the local values (e.g. mean or sum)
+                local_values = critic(flat_obs) # (B*X*Y*Z, 1)
+                # Reshape to (B, -1) and take mean as "Global Value" estimate
+                env_values = local_values.view(B, -1).mean(dim=1)
             
-            # Reshape back to grid
+            # 2. Action Selection
             logits_grid = logits.view(B, X, Y, Z, N_ACTIONS)
-            
-            # 2. Action Selection (Simplified)
-            # We need to select ONE action per environment (Batch KMC)
-            # Or select actions for ALL agents (Vectorized Agents)
-            # SwarmThinkers usually selects one event.
-            # Let's select one event per environment based on max probability or sampling
-            
-            # Flatten spatial dims: (B, X*Y*Z*N_ACTIONS)
             flat_logits = logits_grid.view(B, -1)
             
-            # Mask invalid actions (e.g. vacant sites)
-            # We need a mask from the env. For now, assume env handles it or we learn it.
-            # Ideally, we mask logits for vacant sites to -inf
+            # Masking: We should mask vacant sites?
+            # For now, let's trust the policy learns to not pick them (or env ignores)
             
             probs = torch.softmax(flat_logits, dim=1)
             action_indices = torch.multinomial(probs, num_samples=1).squeeze(1) # (B,)
             
+            # Calculate logprob of selected actions
+            logprobs = torch.log(probs.gather(1, action_indices.unsqueeze(1)).squeeze(1))
+            
             # Decode action index -> (x, y, z, action_type)
-            # index = x*Y*Z*A + y*Z*A + z*A + a
-            
             N_A = N_ACTIONS
-            
-            # Clone indices for decoding
             temp_idx = action_indices.clone()
-            
             a = temp_idx % N_A
             temp_idx = torch.div(temp_idx, N_A, rounding_mode='floor')
-            
             z = temp_idx % Z
             temp_idx = torch.div(temp_idx, Z, rounding_mode='floor')
-            
             y = temp_idx % Y
             temp_idx = torch.div(temp_idx, Y, rounding_mode='floor')
-            
             x = temp_idx
             
-            # Stack to (Batch, 4)
             decoded_actions = torch.stack([x, y, z, a], dim=1) # (B, 4)
             
-            next_obs, rewards, dones, _ = env.step(decoded_actions)
+            next_obs_unused, rewards, dones, _ = env.step(decoded_actions)
             
             # Store data
-            batch_obs.append(flat_obs)
             batch_actions.append(action_indices)
-            batch_values.append(values)
+            batch_logprobs.append(logprobs)
+            batch_values.append(env_values)
             batch_rewards.append(rewards)
             batch_dones.append(dones)
             
-            obs = next_obs
-
         # --- Update Phase (PPO) ---
-        # ... (Standard PPO update code would go here) ...
+        # Convert lists to tensors
+        # (Num_steps, B, ...)
+        b_lattices = torch.stack(batch_lattices) 
+        b_actions = torch.stack(batch_actions)
+        b_logprobs = torch.stack(batch_logprobs)
+        b_rewards = torch.stack(batch_rewards)
+        b_dones = torch.stack(batch_dones)
+        b_values = torch.stack(batch_values)
         
-        if update % 10 == 0:
+        # Calculate Advantages (GAE)
+        with torch.no_grad():
+            # Bootstrap value
+            last_obs = env._get_observations()
+            flat_last_obs = last_obs.permute(0, 2, 3, 4, 1).reshape(-1, 51)
+            last_local_values = critic(flat_last_obs)
+            next_value = last_local_values.view(B, -1).mean(dim=1)
+            
+            advantages = torch.zeros_like(b_rewards)
+            lastgaelam = 0
+            for t in reversed(range(DEFAULT_CONFIG["num_steps"])):
+                if t == DEFAULT_CONFIG["num_steps"] - 1:
+                    nextnonterminal = 1.0 - 0.0 # We don't have next_done for last step easily here
+                    nextvalues = next_value
+                else:
+                    nextnonterminal = 1.0 - b_dones[t + 1].float()
+                    nextvalues = b_values[t + 1]
+                
+                delta = b_rewards[t] + DEFAULT_CONFIG["gamma"] * nextvalues * nextnonterminal - b_values[t]
+                advantages[t] = lastgaelam = delta + DEFAULT_CONFIG["gamma"] * DEFAULT_CONFIG["gae_lambda"] * nextnonterminal * lastgaelam
+            
+            returns = advantages + b_values
+
+        # Flatten batch
+        # (Num_steps * B, ...)
+        b_lattices_flat = b_lattices.view(-1, X, Y, Z)
+        b_actions_flat = b_actions.view(-1)
+        b_logprobs_flat = b_logprobs.view(-1)
+        b_advantages_flat = advantages.view(-1)
+        b_returns_flat = returns.view(-1)
+        b_values_flat = b_values.view(-1)
+        
+        # Optimization Epochs
+        inds = np.arange(args.num_envs * DEFAULT_CONFIG["num_steps"])
+        for epoch in range(DEFAULT_CONFIG["update_epochs"]):
+            np.random.shuffle(inds)
+            # Mini-batch size? Let's do full batch for simplicity or chunks
+            # Memory might be tight if we process all at once.
+            # Let's process in chunks of 64 envs * 16 steps = 1024
+            minibatch_size = 256
+            
+            for start in range(0, len(inds), minibatch_size):
+                end = start + minibatch_size
+                mb_inds = inds[start:end]
+                
+                # Re-evaluate observations
+                # We need to reconstruct the environment state to get observations
+                # This is tricky because `_get_observations` uses `self.lattices`
+                # We can temporarily set `env.lattices` or make `_get_observations` static/functional
+                
+                # Functional approach:
+                # We need to extract the slice of lattices
+                mb_lattices = b_lattices_flat[mb_inds] # (MB, X, Y, Z)
+                
+                # We can hack `env` to use this batch
+                # Save original
+                original_lattices = env.lattices
+                env.lattices = mb_lattices
+                env.num_envs = len(mb_inds) # Temporarily resize
+                
+                new_obs = env._get_observations() # (MB, 51, X, Y, Z)
+                
+                # Restore env
+                env.lattices = original_lattices
+                env.num_envs = args.num_envs
+                
+                # Forward Pass
+                flat_new_obs = new_obs.permute(0, 2, 3, 4, 1).reshape(-1, 51)
+                new_logits = actor(flat_new_obs)
+                new_local_values = critic(flat_new_obs)
+                new_values = new_local_values.view(len(mb_inds), -1).mean(dim=1)
+                
+                # Calculate LogProbs
+                new_logits_grid = new_logits.view(len(mb_inds), X, Y, Z, N_ACTIONS)
+                new_flat_logits = new_logits_grid.view(len(mb_inds), -1)
+                new_probs = torch.softmax(new_flat_logits, dim=1)
+                
+                mb_actions = b_actions_flat[mb_inds]
+                new_logprobs = torch.log(new_probs.gather(1, mb_actions.unsqueeze(1)).squeeze(1))
+                
+                # Policy Loss
+                mb_advantages = b_advantages_flat[mb_inds]
+                mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                
+                logratio = new_logprobs - b_logprobs_flat[mb_inds]
+                ratio = logratio.exp()
+                
+                pg_loss1 = -mb_advantages * ratio
+                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - DEFAULT_CONFIG["clip_coef"], 1 + DEFAULT_CONFIG["clip_coef"])
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                
+                # Value Loss
+                v_loss = 0.5 * ((new_values - b_returns_flat[mb_inds]) ** 2).mean()
+                
+                # Entropy Loss
+                entropy = -(new_probs * torch.log(new_probs + 1e-10)).sum(dim=1).mean()
+                
+                loss = pg_loss - DEFAULT_CONFIG["ent_coef"] * entropy + DEFAULT_CONFIG["vf_coef"] * v_loss
+                
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(list(actor.parameters()) + list(critic.parameters()), DEFAULT_CONFIG["max_grad_norm"])
+                optimizer.step()
+
+        # Logging
+        if update % 1 == 0:
             elapsed = time.time() - start_time
-            print(f"Update {update}/{num_updates} | FPS: {int((update+1)*args.num_envs*DEFAULT_CONFIG['num_steps'] / elapsed)}")
+            fps = int((update+1)*args.num_envs*DEFAULT_CONFIG['num_steps'] / elapsed)
+            print(f"Update {update}/{num_updates} | FPS: {fps} | Loss: {loss.item():.4f} | Reward: {b_rewards.mean().item():.4f}")
+            writer.add_scalar("charts/fps", fps, global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            writer.add_scalar("losses/entropy", entropy.item(), global_step)
+            writer.add_scalar("charts/reward", b_rewards.mean().item(), global_step)
+
+    writer.close()
 
 if __name__ == "__main__":
     train_gpu_swarm()
