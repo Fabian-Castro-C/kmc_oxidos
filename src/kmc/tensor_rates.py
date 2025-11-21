@@ -72,10 +72,10 @@ class TensorRateCalculator:
         coordination_map = coordination_map.squeeze()
 
         # 3. Calculate Activation Energy for every site
-        # Ea = E_base + (Coordination * E_bond_contribution)
-        # Note: This is a simplified model. Real KMC distinguishes Ti-O vs Ti-Ti bonds.
-        # But for the benchmark/demo, this captures the computational complexity.
-        activation_energies = self.E_diff_base + (coordination_map * self.E_bond)
+        # Ea = E_base + (Coordination * |E_bond|)
+        # Note: E_bond is negative (-4.5 eV), so we subtract it to increase the barrier.
+        # Breaking bonds requires energy, so more neighbors = higher barrier.
+        activation_energies = self.E_diff_base - (coordination_map * self.E_bond)
 
         # 4. Calculate Rates (Arrhenius)
         # Rate = nu0 * exp(-Ea / kT)
@@ -85,6 +85,9 @@ class TensorRateCalculator:
         # We only want rates for actual atoms
         atom_mask = lattice_state != SpeciesType.VACANT.value
         rates = rates * atom_mask.float()
+
+        # Replace NaNs with 0.0 (just in case)
+        rates = torch.nan_to_num(rates, nan=0.0)
 
         return rates
 
