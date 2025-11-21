@@ -28,8 +28,9 @@ from src.analysis.fractal import calculate_fractal_dimension
 from src.data.tio2_parameters import TiO2Parameters
 from src.kmc.lattice import SpeciesType
 from src.rl.action_selection import select_action_gumbel_max
-from src.rl.action_space import N_ACTIONS
+from src.rl.action_space import N_ACTIONS, ActionType
 from src.rl.agent_env import AgentBasedTiO2Env
+from src.rl.rate_calculator import ActionRateCalculator
 from src.rl.shared_policy import Actor, Critic
 from src.settings import settings
 
@@ -503,7 +504,8 @@ def load_model(model_path: Path, obs_dim: int, action_dim: int, global_obs_dim: 
     logger.info(f"Loading model from {model_path}")
 
     actor = Actor(obs_dim=obs_dim, action_dim=action_dim).to(device)
-    critic = Critic(obs_dim=global_obs_dim).to(device)
+    # Updated Critic signature for Deep Sets
+    critic = Critic(obs_dim=obs_dim, global_obs_dim=global_obs_dim).to(device)
 
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     actor.load_state_dict(checkpoint["actor_state_dict"])
@@ -544,17 +546,17 @@ def run_prediction(model_path: str):
         seed=CONFIG["torch_seed"],
     )
 
-    # Calculate deposition probability (same formula as training - probabilistic, not competitive)
-    n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
-    delta_t = 0.01  # Same timestep as training
-    lambda_ti = CONFIG["deposition_flux_ti"] * n_sites * delta_t
-    lambda_o = CONFIG["deposition_flux_o"] * n_sites * delta_t
-    lambda_total = lambda_ti + lambda_o
-    p_deposit = 1.0 - np.exp(-lambda_total)
-    p_ti = lambda_ti / lambda_total if lambda_total > 0 else 0.5  # Relative probability of Ti vs O
+    # Initialize Rate Calculator for Physics-Guided RL
+    rate_calculator = ActionRateCalculator(temperature=env.temperature)
 
-    logger.info(f"Deposition params: lambda_Ti={lambda_ti:.3f}, lambda_O={lambda_o:.3f}, P(deposit)={p_deposit:.1%}")
-    logger.info(f"Expected: ~{int(p_deposit * CONFIG['max_steps'])} depositions, ~{int((1 - p_deposit) * CONFIG['max_steps'])} agent actions")
+    # Calculate Deposition Rate (R_dep)
+    n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
+    R_dep_ti = CONFIG["deposition_flux_ti"] * n_sites  # atoms/s
+    R_dep_o = CONFIG["deposition_flux_o"] * n_sites    # atoms/s
+    R_dep_total = R_dep_ti + R_dep_o
+
+    logger.info(f"Deposition Rates: R_Ti={R_dep_ti:.2f}/s, R_O={R_dep_o:.2f}/s, R_total={R_dep_total:.2f}/s")
+    logger.info("Using Physics-Based Competition (R_diff vs R_dep) and Action Reweighting")
 
     # Load model
     obs_dim = env.single_agent_observation_space.shape[0]
@@ -579,13 +581,36 @@ def run_prediction(model_path: str):
         agent_obs = obs["agent_observations"]
         num_agents = len(agent_obs)
 
-        # Decide between DEPOSITION (external event) or AGENT ACTION (probabilistic, same as training)
+        # Decide between DEPOSITION (external event) or AGENT ACTION
         with torch.no_grad():
-            # Roll the dice: does a deposition occur this step?
+            # 1. Calculate Total Diffusion Rate (R_diff)
+            current_diffusion_rates = []
+            total_diff_rate = 0.0
+            
+            if num_agents > 0:
+                # Calculate rates for all agents
+                agent_rates = np.zeros((num_agents, N_ACTIONS), dtype=np.float32)
+                
+                for i, agent in enumerate(env.agents):
+                    for act_idx in range(N_ACTIONS):
+                        act_enum = ActionType(act_idx)
+                        if act_enum in [ActionType.ADSORB_TI, ActionType.ADSORB_O, ActionType.REACT_TIO2]:
+                            continue
+                            
+                        rate = rate_calculator.calculate_action_rate(agent, act_enum, env.lattice)
+                        agent_rates[i, act_idx] = rate
+                        total_diff_rate += rate
+                
+                current_diffusion_rates = agent_rates
+
+            # 2. Calculate Event Probabilities
+            R_total = R_dep_total + total_diff_rate
+            p_deposit = R_dep_total / R_total if R_total > 0 else 1.0
+
+            # 3. Select Event Type
             if np.random.random() < p_deposit:
                 # DEPOSITION EVENT
-                # Choose species based on relative fluxes
-                if np.random.random() < p_ti:
+                if np.random.random() < (R_dep_ti / R_dep_total):
                     action = "DEPOSIT_TI"
                     action_str = "DEPOSIT_TI"
                 else:
@@ -595,7 +620,14 @@ def run_prediction(model_path: str):
                 # AGENT ACTION (if agents exist)
                 if num_agents > 0:
                     obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
-                    diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
+                    policy_logits = actor(obs_tensor)  # [num_agents, num_actions]
+
+                    # --- REWEIGHTING: Combine Policy with Physics ---
+                    # Logit(a) = Policy_Logit(a) + log(Rate(a))
+                    log_rates = np.log(current_diffusion_rates + 1e-10)
+                    log_rates_tensor = torch.from_numpy(log_rates).to(device)
+                    
+                    diffusion_logits = policy_logits + log_rates_tensor
 
                     # Get and apply the action mask
                     action_mask = env.get_action_mask()
