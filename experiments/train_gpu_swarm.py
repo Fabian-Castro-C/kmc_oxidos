@@ -22,7 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.kmc.lattice import SpeciesType
-from src.rl.action_space import N_ACTIONS
+from src.rl.action_space import N_ACTIONS, ActionType
 from src.rl.shared_policy import Actor, Critic
 from src.rl.tensor_env import TensorTiO2Env
 
@@ -33,6 +33,15 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def get_flux_for_update(update_num: int, config: dict) -> tuple[float, float]:
+    """
+    Get deposition flux for current update.
+    """
+    # Simple fixed flux for now, can be extended for schedule
+    return config["deposition_flux_ti"], config["deposition_flux_o"]
+
 
 # Default Config from train_scalable_agent.py
 DEFAULT_CONFIG = {
@@ -93,18 +102,22 @@ def train_gpu_swarm():
     # Deposition Accumulators (per environment)
     deposition_acc = torch.zeros(args.num_envs, device=device)
 
-    # Flux parameters
-    flux_ti = DEFAULT_CONFIG["deposition_flux_ti"]
-    flux_o = DEFAULT_CONFIG["deposition_flux_o"]
-    n_sites = env.nx * env.ny
-    R_dep_ti = flux_ti * n_sites
-    R_dep_o = flux_o * n_sites
-    R_dep_total = R_dep_ti + R_dep_o
-
     # Initial Reset
     obs = env.reset()  # (Batch, 51, X, Y, Z)
 
     for update in range(1, num_updates + 1):
+        # --- Flux Schedule ---
+        flux_ti, flux_o = get_flux_for_update(update, DEFAULT_CONFIG)
+        n_sites = env.nx * env.ny
+        R_dep_ti = flux_ti * n_sites
+        R_dep_o = flux_o * n_sites
+        R_dep_total = R_dep_ti + R_dep_o
+
+        logger.info(f"--- Training Update {update}/{num_updates} ---")
+        logger.info(
+            f"  Deposition Rates: R_Ti={R_dep_ti:.2f}/s, R_O={R_dep_o:.2f}/s, R_total={R_dep_total:.2f}/s"
+        )
+
         # Storage for rollout
         batch_lattices = []  # Store state to recompute obs
         batch_actions = []  # Flat indices
@@ -113,6 +126,9 @@ def train_gpu_swarm():
         batch_dones = []
         batch_values = []
         batch_log_rates = []  # For reweighting
+
+        # For detailed logging of the first environment
+        detailed_log_steps = []
 
         # Logging stats for this update
         ep_rewards = []
@@ -171,8 +187,8 @@ def train_gpu_swarm():
             guided_logits[~is_occupied] = -1e9
 
             # Sample Actions
-            probs = torch.softmax(guided_logits, dim=1)
-            action_indices = torch.multinomial(probs, num_samples=1).squeeze(1)  # (B*XYZ,)
+            # Note: We don't need to sample for ALL agents, just the ones we might pick.
+            # But for batch efficiency we compute logits for all.
 
             # 5. Select ONE action per environment
             flat_env_logits = guided_logits.view(B, -1)
@@ -200,6 +216,11 @@ def train_gpu_swarm():
 
             # Create "final" rewards tensor
             step_rewards = torch.zeros(B, device=device)
+
+            # Track action type for logging (0=Agent, 1=Deposition)
+            # For the first env, we want to know exactly what happened
+            log_action_type = "Agent Action"
+            log_details = f"Agent at ({x[0]},{y[0]},{z[0]}) -> {ActionType(a[0].item()).name}"
 
             # Execute Agent Step (for ALL, but we'll ignore/overwrite for depositing)
             next_obs, rewards, dones, _ = env.step(agent_actions)
@@ -237,6 +258,21 @@ def train_gpu_swarm():
                     r_o = env.deposit(o_idx, SpeciesType.O, o_coords)
                     step_rewards[o_idx] = r_o  # Overwrite reward
 
+                # Check if first env was a deposition
+                if should_deposit[0]:
+                    log_action_type = "Deposition"
+                    # Was it Ti or O?
+                    # We need to check the specific choice for index 0
+                    # Re-find the index in dep_indices
+                    idx_in_dep = (dep_indices == 0).nonzero()
+                    if len(idx_in_dep) > 0:
+                        idx = idx_in_dep.item()
+                        is_ti_0 = is_ti[idx]
+                        species = "Ti" if is_ti_0 else "O"
+                        log_details = (
+                            f"Deposit {species} at ({dep_x[idx]},{dep_y[idx]},{dep_z[idx]})"
+                        )
+
             # Store data
             batch_actions.append(env_action_indices)
             batch_logprobs.append(env_logprobs)
@@ -247,6 +283,17 @@ def train_gpu_swarm():
 
             obs = next_obs
             ep_rewards.append(step_rewards.mean().item())
+
+            # Log for first env
+            if step < 30:
+                detailed_log_steps.append(
+                    {
+                        "step": step,
+                        "type": log_action_type,
+                        "details": log_details,
+                        "reward": step_rewards[0].item(),
+                    }
+                )
 
         # --- Update Phase (PPO) ---
         b_lattices = torch.stack(batch_lattices)  # (T, B, X, Y, Z)
@@ -395,15 +442,20 @@ def train_gpu_swarm():
             f"Update {update}/{num_updates} | FPS: {fps} | Loss: {loss.item():.4f} | Reward: {mean_reward:.4f}"
         )
 
-        # Detailed Step Logging (First 30 steps)
-        logger.info("--- First 30 Steps ---")
-        for i in range(min(30, DEFAULT_CONFIG["num_steps"])):
-            # We need to know if it was Deposition or Agent Action
-            # We can infer from reward? Or just log what we have.
-            # We didn't store action type explicitly.
-            # But we can log the reward.
-            r = b_rewards[i, 0].item()  # Log for first env
-            logger.info(f"  [{i:3d}] Reward: {r:+.4f}")
+        # Rollout Summary
+        total_steps = args.num_envs * DEFAULT_CONFIG["num_steps"]
+        dep_pct = 100.0 * n_depositions / total_steps
+        agent_pct = 100.0 * n_agent_actions / total_steps
+        logger.info(
+            f"  Rollout summary: {n_depositions} depositions ({dep_pct:.1f}%), {n_agent_actions} agent actions ({agent_pct:.1f}%)"
+        )
+
+        # Detailed Step Logging (First 30 steps of first env)
+        logger.info("--- First 30 Steps (Env 0) ---")
+        for log in detailed_log_steps:
+            logger.info(
+                f"  [{log['step']:3d}] {log['type']:<15} | {log['details']:<40} | Reward: {log['reward']:+.4f}"
+            )
 
         writer.add_scalar("charts/fps", fps, global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
