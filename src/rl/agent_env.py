@@ -141,6 +141,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Episode state
         self.step_count = 0
         self.total_reward = 0.0
+        self.simulated_time = 0.0  # Track physical time in seconds
         self.episode_info: dict[str, Any] = {}
         self.prev_omega: float = 0.0  # Track grand potential for reward calculation
         self.step_info: list[dict[str, Any]] = []  # Store info for logging
@@ -172,17 +173,17 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # ========== PERFORMANCE OPTIMIZATIONS: Incremental Caches ==========
         # These caches eliminate O(N) operations by maintaining statistics incrementally
-        
+
         # Bond counts cache - avoids O(N×6) iteration over all sites
         self._bond_counts: dict[str, int] = {"ti_ti": 0, "ti_o": 0, "o_o": 0}
         self._bond_counts_dirty: bool = True  # Flag to rebuild cache on first access
-        
+
         # Height statistics cache - avoids O(N) iteration for mean/std
         self._height_sum: float = 0.0
         self._height_sq_sum: float = 0.0
         self._num_occupied: int = 0
         self._height_stats_dirty: bool = True  # Flag to rebuild cache on first access
-        
+
         # System energy cache - avoids O(N) iteration for energy calculation
         self._system_energy: float = 0.0
         self._energy_dirty: bool = True  # Flag to rebuild cache on first access
@@ -222,7 +223,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         # Initialize lattice
         self.lattice = Lattice(size=self.lattice_size)
-        
+
         # Expose species counts cache to lattice for energy calculator (O(1) access)
         self.lattice._species_counts_cache = self._species_counts
 
@@ -242,6 +243,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Reset episode state
         self.step_count = 0
         self.total_reward = 0.0
+        self.simulated_time = 0.0
         self.episode_info = {
             "episode_length": 0,
             "episode_reward": 0.0,
@@ -280,14 +282,18 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         return observation, info
 
-    def step(self, action: tuple[int, int] | str | None) -> tuple[dict, float, bool, bool, dict]:
+    def step(
+        self, action: tuple[int, int] | str | None, dt: float = 0.0
+    ) -> tuple[dict, float, bool, bool, dict]:
         """
         Execute one time step within the environment.
 
         Args:
             action: (agent_idx, action_idx) for agent action, or a string for global actions.
+            dt: Physical time elapsed during this step (seconds).
         """
         self.step_count += 1
+        self.simulated_time += dt
         num_depositions = 0
 
         # The training loop now decides between agent actions and deposition.
@@ -304,7 +310,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             if success:
                 num_depositions += 1
                 self._action_type_history.append("DEPOSIT")
-            action_was_exploration = False
             executed_action = action
 
         elif isinstance(action, tuple):
@@ -319,12 +324,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 success, reason = self._execute_agent_action(agent_idx, action_idx)
 
             _action_enum = ActionType(action_idx)
-            action_was_exploration = _action_enum in [
-                ActionType.DESORB,
-                ActionType.DIFFUSE_X_POS, ActionType.DIFFUSE_X_NEG,
-                ActionType.DIFFUSE_Y_POS, ActionType.DIFFUSE_Y_NEG,
-                ActionType.DIFFUSE_Z_POS, ActionType.DIFFUSE_Z_NEG,
-            ]
             executed_action = (_agent.site_idx if _agent else -1, _action_enum.name)
 
             # Track action for loop detection
@@ -341,7 +340,6 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             # No action or invalid action
             success = False
             reason = "No action provided or invalid action type"
-            action_was_exploration = False
             executed_action = "NO_ACTION"
 
         # Keep action type history limited
@@ -349,7 +347,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             self._action_type_history.pop(0)
 
         # Calculate reward based on change in grand potential
-        reward = self._calculate_reward(action_was_exploration=action_was_exploration)
+        reward = self._calculate_reward()
 
         # Detect and penalize loops
         if self._detect_action_loop():
@@ -371,7 +369,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             ti_o_ratio = n_ti / (n_o / 2.0) if n_o > 0 else 0.0
             _, ti_o_bonds, _ = self._count_bonds()
             global_features = self._get_observation()["global_features"]
-            avg_coordination = global_features[8] # Index 8 is avg_coord now
+            avg_coordination = global_features[8]  # Index 8 is avg_coord now
 
             structural_metrics = {
                 "ti_o_ratio": ti_o_ratio,
@@ -388,6 +386,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
         info = {
             "step": self.step_count,
+            "time": self.simulated_time,
             "roughness": roughness,
             "coverage": coverage,
             "n_agents": len(self.agents),
@@ -400,14 +399,16 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         }
 
         if terminated or truncated:
-            self.episode_info.update({
-                "episode_length": self.step_count,
-                "episode_reward": self.total_reward,
-                "final_roughness": roughness,
-                "final_coverage": coverage,
-                "n_ti": self._count_species(SpeciesType.TI),
-                "n_o": self._count_species(SpeciesType.O),
-            })
+            self.episode_info.update(
+                {
+                    "episode_length": self.step_count,
+                    "episode_reward": self.total_reward,
+                    "final_roughness": roughness,
+                    "final_coverage": coverage,
+                    "n_ti": self._count_species(SpeciesType.TI),
+                    "n_o": self._count_species(SpeciesType.O),
+                }
+            )
             info.update(self.episode_info)
 
         observation = self._get_observation()
@@ -539,9 +540,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
                             # Update only affected agents incrementally
                             self._update_affected_agents([site_idx])
-                            
+
                             # Update incremental caches
-                            self._update_height_stats_incremental("deposit", site_idx, new_z=z)
+                            self._update_height_stats_incremental("deposit", new_z=z)
                             self._update_bond_counts_incremental([site_idx])
                         return success, reason
                     # This vacant site doesn't have support, check next z level
@@ -572,24 +573,26 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 return False, f"Diffusion failed: invalid move for action {action_enum.name}"
 
             from_site_idx = agent.site_idx
-            
+
             # Get old height BEFORE diffusion
             old_z = self.lattice.sites[from_site_idx].position[2]
-            
+
             success, reason = self.lattice.diffuse_atom(from_site_idx, target_site)
             if success:
                 # Get new height AFTER diffusion
                 new_z = self.lattice.sites[target_site].position[2]
-                
+
                 # Update only affected agents incrementally (both source and destination)
                 self._update_affected_agents([from_site_idx, target_site])
 
                 # Update valid deposition sites
                 self._update_deposition_sites_incremental(from_site_idx)
                 self._update_deposition_sites_incremental(target_site)
-                
+
                 # Update incremental caches
-                self._update_height_stats_incremental("diffuse", from_site_idx, old_z=old_z, new_z=new_z)
+                self._update_height_stats_incremental(
+                    "diffuse", old_z=old_z, new_z=new_z
+                )
                 self._update_bond_counts_incremental([from_site_idx, target_site])
 
         elif action_idx == ActionType.DESORB.value:
@@ -597,7 +600,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             from_site_idx = agent.site_idx
             old_species = self.lattice.sites[from_site_idx].species
             old_z = self.lattice.sites[from_site_idx].position[2]
-            
+
             success, reason = self.lattice.desorb_atom(from_site_idx)
             if success:
                 # Update species count
@@ -610,9 +613,9 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
 
                 # Update valid deposition sites
                 self._update_deposition_sites_incremental(from_site_idx)
-                
+
                 # Update incremental caches
-                self._update_height_stats_incremental("desorb", from_site_idx, old_z=old_z)
+                self._update_height_stats_incremental("desorb", old_z=old_z)
                 self._update_bond_counts_incremental([from_site_idx])
         else:
             return False, f"Unknown action index: {action_idx}"
@@ -675,25 +678,25 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Global features with rich thermodynamic information
         # NOTE: We normalize these features to be roughly in range [-1, 1] or [0, 1]
         # to improve Critic convergence.
-        
+
         # Energy normalization: ~ -10 eV per atom
         norm_energy = total_energy / (num_atoms * 10.0 + 1e-5)
         norm_omega = grand_potential / (num_atoms * 10.0 + 1e-5)
-        
+
         global_features = np.array(
             [
-                self._calculate_mean_height() / 20.0, # Normalize by max expected height
-                self._calculate_height_std() / 5.0,   # Normalize by max expected roughness
-                self._species_counts[SpeciesType.TI] / (total_sites + 1e-5), # Density
+                self._calculate_mean_height() / 20.0,  # Normalize by max expected height
+                self._calculate_height_std() / 5.0,  # Normalize by max expected roughness
+                self._species_counts[SpeciesType.TI] / (total_sites + 1e-5),  # Density
                 self._species_counts[SpeciesType.O] / (total_sites + 1e-5),  # Density
-                self._species_counts[SpeciesType.VACANT] / (total_sites + 1e-5), # Density
+                self._species_counts[SpeciesType.VACANT] / (total_sites + 1e-5),  # Density
                 norm_energy,  # Normalized System energy
                 norm_omega,  # Normalized Grand potential Ω
                 bond_density / 6.0,  # Normalized Bond density (max ~6)
                 avg_coordination / 6.0,  # Normalized Average coordination
                 float(num_ti_o_bonds) / (total_bonds + 1e-5),  # Fraction of Ti-O bonds
                 float(num_atoms) / (total_sites + 1e-5),  # Coverage fraction
-                0.0, # Placeholder to keep dim=12 (was total_atoms)
+                0.0,  # Placeholder to keep dim=12 (was total_atoms)
             ],
             dtype=np.float32,
         )
@@ -703,21 +706,15 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             "global_features": global_features,
         }
 
-    def _calculate_reward(
-        self,
-        action_was_exploration: bool = False,
-    ) -> float:
+    def _calculate_reward(self) -> float:
         """
-        Calculate SwarmThinkers reward for an open system: r_t = -ΔΩ + bonuses.
+        Calculate SwarmThinkers reward for an open system: r_t = -ΔΩ.
 
         A negative change in grand potential (system becomes more stable)
         results in a positive reward.
 
-        Args:
-            action_was_exploration: True if action was DIFFUSE or DESORB
-
         Returns:
-            Reward r_t = -ΔΩ (eV) + exploration bonus, scaled to reduce variance
+            Reward r_t = -ΔΩ (eV), scaled to reduce variance
         """
         # Calculate current grand potential after agent action
         current_omega = self.energy_calculator.calculate_grand_potential(self.lattice)
@@ -775,13 +772,13 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """Calculate mean surface height (with incremental cache)."""
         if self.lattice is None:
             return 0.0
-        
+
         # Use incremental cache if available
         if not self._height_stats_dirty:
             if self._num_occupied == 0:
                 return 0.0
             return self._height_sum / self._num_occupied
-        
+
         # Fallback: full recalculation and rebuild cache
         self._rebuild_height_stats_cache()
         return self._height_sum / self._num_occupied if self._num_occupied > 0 else 0.0
@@ -790,7 +787,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """Calculate height standard deviation (with incremental cache)."""
         if self.lattice is None:
             return 0.0
-        
+
         # Use incremental cache if available
         if not self._height_stats_dirty:
             if self._num_occupied == 0:
@@ -798,7 +795,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
             mean = self._height_sum / self._num_occupied
             variance = (self._height_sq_sum / self._num_occupied) - (mean * mean)
             return float(np.sqrt(max(0.0, variance)))  # Clamp negative due to floating point
-        
+
         # Fallback: full recalculation and rebuild cache
         self._rebuild_height_stats_cache()
         if self._num_occupied == 0:
@@ -825,7 +822,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 self._bond_counts["ti_o"],
                 self._bond_counts["o_o"],
             )
-        
+
         # Fallback: full recalculation and rebuild cache
         self._rebuild_bond_counts_cache()
         return (
@@ -937,7 +934,7 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
     # ========== INCREMENTAL CACHE REBUILDERS ==========
     # These methods perform full O(N) calculations to rebuild caches
     # Called only at reset() or when cache is invalidated
-    
+
     def _rebuild_bond_counts_cache(self) -> None:
         """
         Full O(N×k) bond counting - only called at reset or when dirty flag is set.
@@ -993,14 +990,14 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
     # ========== INCREMENTAL CACHE UPDATERS ==========
     # These methods update caches incrementally based on specific actions
     # Cost: O(k²) where k ≈ 6 neighbors << O(N)
-    
+
     def _update_bond_counts_incremental(self, affected_sites: list[int]) -> None:
         """
         Update bond counts incrementally for affected sites.
-        
+
         Args:
             affected_sites: List of site indices that changed (deposit/desorb/diffuse).
-        
+
         Strategy:
             - For each affected site, recount bonds with its neighbors
             - Subtract old bonds, add new bonds
@@ -1008,72 +1005,68 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         """
         if self._bond_counts_dirty:
             return  # Cache will be rebuilt on next access
-        
+
         # For simplicity, recalculate bonds for all affected sites and neighbors
         # More sophisticated: track old/new species and delta only changed bonds
         affected_set = set(affected_sites)
-        
+
         # Add neighbors of affected sites to recalculation set
         for site_idx in affected_sites:
             site = self.lattice.sites[site_idx]
             affected_set.update(site.neighbors)
-        
+
         # Subtract old bonds involving affected sites
         for site_idx in affected_set:
             site = self.lattice.sites[site_idx]
             if site.species == SpeciesType.VACANT:
                 continue
-                
+
             for neighbor_idx in site.neighbors:
                 if neighbor_idx not in affected_set or neighbor_idx <= site_idx:
                     continue  # Avoid double counting and sites outside affected region
-                    
+
                 neighbor = self.lattice.sites[neighbor_idx]
                 if neighbor.species == SpeciesType.VACANT:
                     continue
-                
+
                 # This bond existed before - will be recounted, so continue
                 # Actually, we need to do full recount for affected region
                 pass
-        
+
         # Simpler approach: mark as dirty, will rebuild on next access
         # Full incremental logic would track species changes per site
         self._bond_counts_dirty = True
 
     def _update_height_stats_incremental(
-        self, action_type: str, site_idx: int, old_z: int | None = None, new_z: int | None = None
+        self, action_type: str, old_z: int | None = None, new_z: int | None = None
     ) -> None:
         """
         Update height statistics incrementally.
-        
+
         Args:
             action_type: "deposit", "desorb", or "diffuse"
-            site_idx: Site index affected
             old_z: Previous height (for diffuse/desorb)
             new_z: New height (for diffuse/deposit)
         """
         if self._height_stats_dirty:
             return  # Cache will be rebuilt on next access
-        
-        if action_type == "deposit":
+
+        if action_type == "deposit" and new_z is not None:
             # Add new atom at new_z
-            if new_z is not None:
-                self._height_sum += new_z
-                self._height_sq_sum += new_z * new_z
-                self._num_occupied += 1
-                
-        elif action_type == "desorb":
+            self._height_sum += new_z
+            self._height_sq_sum += new_z * new_z
+            self._num_occupied += 1
+
+        elif action_type == "desorb" and old_z is not None and self._num_occupied > 0:
             # Remove atom at old_z
-            if old_z is not None and self._num_occupied > 0:
-                self._height_sum -= old_z
-                self._height_sq_sum -= old_z * old_z
-                self._num_occupied -= 1
-                
-        elif action_type == "diffuse":
+            self._height_sum -= old_z
+            self._height_sq_sum -= old_z * old_z
+            self._num_occupied -= 1
+
+        elif action_type == "diffuse" and old_z is not None and new_z is not None:
             # Move atom from old_z to new_z
-            if old_z is not None and new_z is not None:
-                self._height_sum = self._height_sum - old_z + new_z
-                self._height_sq_sum = self._height_sq_sum - (old_z * old_z) + (new_z * new_z)
+            self._height_sum = self._height_sum - old_z + new_z
+            self._height_sq_sum = self._height_sq_sum - (old_z * old_z) + (new_z * new_z)
 
     def _mark_caches_dirty_on_reset(self) -> None:
         """Mark all caches as dirty - called in reset()."""

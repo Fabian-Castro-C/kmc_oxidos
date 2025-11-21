@@ -392,6 +392,11 @@ def main() -> None:
                 # 2. Calculate Event Probabilities
                 R_total = R_dep_total + total_diff_rate
                 p_deposit = R_dep_total / R_total if R_total > 0 else 1.0
+                
+                # Calculate physical time step (KMC residence time)
+                # dt = -ln(u) / R_total
+                # We use expected time 1/R_total for simplicity in RL, or sample it
+                dt = 1.0 / R_total if R_total > 0 else 0.0
 
                 # 3. Select Event Type
                 if np.random.random() < p_deposit:
@@ -409,7 +414,7 @@ def main() -> None:
                     all_logprobs.append(torch.tensor(0.0).to(device))  # No policy decision
 
                     # Execute deposition
-                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    next_obs, reward, terminated, truncated, info = env.step(action, dt=dt)
                     num_depositions_in_rollout += 1
                     deposition_rewards.append(reward)
 
@@ -455,7 +460,7 @@ def main() -> None:
                     all_actions.append(action)
 
                     # Execute action in the environment
-                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    next_obs, reward, terminated, truncated, info = env.step(action, dt=dt)
                     num_agent_actions_in_rollout += 1
                     actor_rewards.append(reward)
                 else:
@@ -468,7 +473,7 @@ def main() -> None:
                     all_logprobs.append(torch.tensor(0.0).to(device))
 
                     # Execute forced deposition
-                    next_obs, reward, terminated, truncated, info = env.step(action)
+                    next_obs, reward, terminated, truncated, info = env.step(action, dt=dt)
                     num_depositions_in_rollout += 1
                     deposition_rewards.append(reward)
 
