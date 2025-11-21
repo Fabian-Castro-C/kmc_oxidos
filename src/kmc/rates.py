@@ -189,7 +189,12 @@ class RateCalculator:
         coordination_factor = site.coordination / 6.0
         # Target site coordination affects barrier (higher target coordination = harder to hop into)
         target_factor = target_site.coordination / 6.0
-        effective_ea = activation_energy * (0.7 + 0.3 * coordination_factor + 0.1 * target_factor)
+        
+        # MODIFIED: Base activation energy is for isolated surface adatom (coord=0).
+        # Coordination increases the barrier (trapping/bonding).
+        # Old formula: effective_ea = activation_energy * (0.7 + 0.3 * coordination_factor + 0.1 * target_factor)
+        # New formula: effective_ea = activation_energy * (1.0 + 0.5 * coordination_factor + 0.2 * target_factor)
+        effective_ea = activation_energy * (1.0 + 0.5 * coordination_factor + 0.2 * target_factor)
 
         # Bonded atoms (part of TiO2) diffuse much slower
         if site.is_in_oxide:

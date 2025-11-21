@@ -211,7 +211,10 @@ def main() -> None:
         activation=actor_activation,
     ).to(device)
     critic = Critic(
-        obs_dim=global_obs_dim, hidden_dims=critic_hidden, activation=critic_activation
+        obs_dim=obs_dim,
+        global_obs_dim=global_obs_dim,
+        hidden_dims=critic_hidden,
+        activation=critic_activation,
     ).to(device)
 
     # Optimizer - Note: deposition_logit is NOT included here as it's a fixed parameter
@@ -223,11 +226,10 @@ def main() -> None:
 
     logger.info("Starting training...")
     logger.info(f"Device: {device}")
-    logger.info(f"Training Flux (Ti): {train_flux_ti} ML/s (100x)")
-    logger.info(f"Training Flux (O): {train_flux_o} ML/s (100x)")
-    logger.info(f"Validation Flux (Ti): {validation_flux_ti} ML/s (1x)")
-    logger.info(f"Validation Flux (O): {validation_flux_o} ML/s (1x)")
-    logger.info("Curriculum: Training flux for 4/5 updates, validation flux for 1/5 updates")
+    if CONFIG.get("enable_flux_schedule", False):
+        logger.info("Curriculum: Training flux for 4/5 updates, validation flux for 1/5 updates")
+    else:
+        logger.info("Curriculum: Disabled (Using fixed training flux)")
     logger.info(f"Actor Params: {sum(p.numel() for p in actor.parameters()):,}")
     logger.info(f"Critic Params: {sum(p.numel() for p in critic.parameters()):,}")
 
@@ -268,7 +270,8 @@ def main() -> None:
         should_log_this_update = (update % log_every_n_updates == 0) or (update == 1)
 
         # Determine if this is a validation update (every 5th)
-        is_validation_update = update % 5 == 0
+        # Only apply validation label if schedule is enabled OR if we implement validation logic
+        is_validation_update = (update % 5 == 0) and CONFIG.get("enable_flux_schedule", False)
 
         if is_validation_update:
             logger.info(
@@ -373,14 +376,7 @@ def main() -> None:
                         # We skip ADSORB as that's handled by deposition event
                         for act_idx in range(N_ACTIONS):
                             act_enum = ActionType(act_idx)
-                            # Only calculate for diffusion/desorption
-                            if act_enum in [
-                                ActionType.ADSORB_TI,
-                                ActionType.ADSORB_O,
-                                ActionType.REACT_TIO2,
-                            ]:
-                                continue
-
+                            
                             rate = rate_calculator.calculate_action_rate(
                                 agent, act_enum, env.lattice
                             )

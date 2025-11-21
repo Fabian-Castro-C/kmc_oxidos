@@ -222,18 +222,16 @@ class ParticleAgent:
         """
         Get list of valid actions for this agent based on its species.
 
-        For Ti atoms, includes REACT_TIO2 only if there are at least 2 O neighbors.
-
         Returns:
             List of valid ActionType values.
         """
         from src.kmc.lattice import SpeciesType
 
         if self.species == SpeciesType.VACANT:
-            # Vacant sites can adsorb Ti or O
-            return [ActionType.ADSORB_TI, ActionType.ADSORB_O]
-        elif self.species == SpeciesType.TI:
-            # Ti can diffuse, desorb, or react with O neighbors
+            # Vacant sites cannot be agents
+            return []
+        elif self.species == SpeciesType.TI or self.species == SpeciesType.O:
+            # Atoms can diffuse or desorb
             actions = [
                 ActionType.DIFFUSE_X_POS,
                 ActionType.DIFFUSE_X_NEG,
@@ -243,25 +241,9 @@ class ParticleAgent:
                 ActionType.DIFFUSE_Z_NEG,
                 ActionType.DESORB,
             ]
-            # Check if reaction is possible (need at least 2 O neighbors)
-            obs = self.observe()
-            o_neighbors = np.sum(obs.neighbors_1st == SpeciesType.O.value)
-            if o_neighbors >= 2:
-                actions.append(ActionType.REACT_TIO2)
             return actions
-        elif self.species == SpeciesType.O:
-            # O can diffuse or desorb (no reaction for O)
-            return [
-                ActionType.DIFFUSE_X_POS,
-                ActionType.DIFFUSE_X_NEG,
-                ActionType.DIFFUSE_Y_POS,
-                ActionType.DIFFUSE_Y_NEG,
-                ActionType.DIFFUSE_Z_POS,
-                ActionType.DIFFUSE_Z_NEG,
-                ActionType.DESORB,
-            ]
-        else:
-            return []
+        
+        return []
 
     def get_neighbors(self, lattice_size: tuple[int, int, int]) -> dict[ActionType, int]:
         """

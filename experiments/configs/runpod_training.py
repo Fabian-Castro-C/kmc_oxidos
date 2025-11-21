@@ -29,11 +29,14 @@ ENV_CONFIG = {
     # A100-80GB: (80, 80, 150) → 960,000 sites (recommended)
     "lattice_size": (10, 10, 50),  # Small lattice for fast training
     # Physical parameters (MUST match between training and inference)
-    "temperature": 600.0,  # Kelvin - PVD typical temperature
-    "deposition_flux_ti": 1.0,  # ML/s - Titanium flux (training, AGGRESSIVE curriculum)
-    "deposition_flux_o": 2.0,  # ML/s - Oxygen flux (training, AGGRESSIVE curriculum)
-    "validation_flux_ti": 0.1,  # ML/s - Titanium flux (validation, experimental typical)
-    "validation_flux_o": 0.2,  # ML/s - Oxygen flux (validation, experimental typical)
+    # LOWERED TEMPERATURE FOR TRAINING VALIDATION:
+    # At 600K, diffusion is 10^5x faster than deposition, so 2048 steps = 1 atom moving.
+    # At 350K, diffusion is comparable to deposition, allowing film growth in 2048 steps.
+    "temperature": 300.0,  # Kelvin - Adjusted for RL timescale balance
+    "deposition_flux_ti": 5.0,  # ML/s - Increased flux to ensure growth
+    "deposition_flux_o": 10.0,  # ML/s - Increased flux to ensure growth
+    "validation_flux_ti": 1.0,  # ML/s
+    "validation_flux_o": 2.0,  # ML/s
     # Episode configuration
     "max_steps_per_episode": 3000,  # Longer episodes for larger system equilibration
     # Random seed for reproducibility
@@ -44,7 +47,7 @@ ENV_CONFIG = {
 # FLUX SCHEDULE (Progressive Curriculum)
 # ============================================================================
 FLUX_SCHEDULE_CONFIG = {
-    "enable_flux_schedule": True,
+    "enable_flux_schedule": False,
     # Progressive flux reduction for balanced growth + kinetics
     # Flux values in ML/s (Monolayers per second) - physical units
     # With Poisson: P(deposit) = 1 - exp(-λ), where λ = flux_total * n_sites * 0.01
@@ -135,7 +138,7 @@ TRAINING_CONFIG = {
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
-    "resume_from_checkpoint": "experiments/results/train/runpod_20251117_061812/models/best_model.pt",  # Fine-tuning from best model (Actor Reward: 0.2558)
+    "resume_from_checkpoint": None,  # Fine-tuning from best model (Actor Reward: 0.2558)
     # --- END NEW ---
     # Checkpointing
     "checkpoint_frequency": 50,  # Save checkpoint every N updates

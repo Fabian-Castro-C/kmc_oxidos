@@ -94,17 +94,9 @@ class ActionRateCalculator:
         ]:
             return self._calculate_diffusion_rate(agent, action, lattice)
 
-        # ADSORPTION ACTIONS (Ti or O onto vacant site)
-        elif action in [ActionType.ADSORB_TI, ActionType.ADSORB_O]:
-            return self._calculate_adsorption_rate(agent, action, lattice)
-
         # DESORPTION ACTION (Ti or O removal)
         elif action == ActionType.DESORB:
             return self._calculate_desorption_rate(agent, lattice)
-
-        # REACTION ACTION (Ti + 2O → TiO₂)
-        elif action == ActionType.REACT_TIO2:
-            return self._calculate_reaction_rate(agent, lattice)
 
         else:
             # Unknown action
