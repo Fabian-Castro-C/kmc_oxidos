@@ -53,23 +53,32 @@ class TensorRateCalculator:
         Calculate diffusion rates for ALL atoms in the lattice simultaneously.
 
         Args:
-            lattice_state: (nx, ny, nz) int8 tensor
+            lattice_state: (nx, ny, nz) OR (batch, nx, ny, nz) int8 tensor
 
         Returns:
-            rates: (nx, ny, nz) float32 tensor of total diffusion rates
+            rates: Same shape as input, float32 tensor of total diffusion rates
         """
         # 1. Prepare input for convolution
-        # Convert to float and add Batch/Channel dims: (1, 1, nx, ny, nz)
         # We treat any non-vacant site as "occupied" (1.0)
-        occupancy = (lattice_state != SpeciesType.VACANT.value).float().unsqueeze(0).unsqueeze(0)
+        is_batch = lattice_state.ndim == 4
+        
+        if is_batch:
+            # Input: (Batch, X, Y, Z) -> (Batch, 1, X, Y, Z)
+            occupancy = (lattice_state != SpeciesType.VACANT.value).float().unsqueeze(1)
+        else:
+            # Input: (X, Y, Z) -> (1, 1, X, Y, Z)
+            occupancy = (lattice_state != SpeciesType.VACANT.value).float().unsqueeze(0).unsqueeze(0)
 
         # 2. Convolve to get coordination number for every site
         # Padding=1 ensures we handle boundaries (requires careful PBC handling later)
         # For now, zero-padding is used (open boundaries)
         coordination_map = F.conv3d(occupancy, self.kernel_coordination, padding=1)
 
-        # Remove batch/channel dims
-        coordination_map = coordination_map.squeeze()
+        # Remove channel dim
+        if is_batch:
+            coordination_map = coordination_map.squeeze(1)
+        else:
+            coordination_map = coordination_map.squeeze()
 
         # 3. Calculate Activation Energy for every site
         # Ea = E_base + (Coordination * |E_bond|)
