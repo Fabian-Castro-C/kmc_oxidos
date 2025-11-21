@@ -350,11 +350,13 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         reward = self._calculate_reward()
 
         # Detect and penalize loops
-        if self._detect_action_loop():
-            reward -= self._loop_penalty
+        # REMOVED: We rely purely on thermodynamics. Loops yield 0 energy gain, which is sufficient signal.
+        # if self._detect_action_loop():
+        #     reward -= 0.1
 
-        if not success:
-            reward = -0.1  # Penalty for invalid actions
+        # if not success:
+        #     reward = -0.1  # Penalty for invalid actions
+
         self.total_reward += reward
 
         # Check termination conditions
@@ -538,6 +540,10 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                             self._species_counts[species] += 1
                             self._species_counts[SpeciesType.VACANT] -= 1
 
+                            # Invalidate caches
+                            self._cached_coverage = None
+                            self._cached_roughness = None
+
                             # Update only affected agents incrementally
                             self._update_affected_agents([site_idx])
 
@@ -582,6 +588,10 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 # Get new height AFTER diffusion
                 new_z = self.lattice.sites[target_site].position[2]
 
+                # Invalidate caches
+                self._cached_coverage = None
+                self._cached_roughness = None
+
                 # Update only affected agents incrementally (both source and destination)
                 self._update_affected_agents([from_site_idx, target_site])
 
@@ -607,6 +617,10 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                 if old_species in self._species_counts:
                     self._species_counts[old_species] -= 1
                     self._species_counts[SpeciesType.VACANT] += 1
+
+                # Invalidate caches
+                self._cached_coverage = None
+                self._cached_roughness = None
 
                 # Update only affected agents incrementally
                 self._update_affected_agents([from_site_idx])

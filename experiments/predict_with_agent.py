@@ -41,11 +41,11 @@ logger = settings.setup_logging()
 # NOTE: Deposition fluxes MUST match training configuration for consistency
 CONFIG = {
     "torch_seed": 42,
-    "lattice_size": (30, 30, 20),  # Can differ from training size
-    "deposition_flux_ti": 0.1,  # MUST match training: Ti monolayers per second
-    "deposition_flux_o": 0.2,   # MUST match training: O monolayers per second
+    "lattice_size": (20, 20, 20),  # Slightly smaller for faster visualization
+    "deposition_flux_ti": 5.0,  # Match training flux
+    "deposition_flux_o": 10.0,   # Match training flux
     "temperature": 600.0,  # Temperature in Kelvin (should match training)
-    "max_steps": 500,
+    "max_steps": 2000,     # More steps to see growth
     "n_snapshots": 20,
 }
 
@@ -594,8 +594,8 @@ def run_prediction(model_path: str):
                 for i, agent in enumerate(env.agents):
                     for act_idx in range(N_ACTIONS):
                         act_enum = ActionType(act_idx)
-                        if act_enum in [ActionType.ADSORB_TI, ActionType.ADSORB_O, ActionType.REACT_TIO2]:
-                            continue
+                        # if act_enum in [ActionType.ADSORB_TI, ActionType.ADSORB_O, ActionType.REACT_TIO2]:
+                        #     continue
                             
                         rate = rate_calculator.calculate_action_rate(agent, act_enum, env.lattice)
                         agent_rates[i, act_idx] = rate
@@ -606,6 +606,13 @@ def run_prediction(model_path: str):
             # 2. Calculate Event Probabilities
             R_total = R_dep_total + total_diff_rate
             p_deposit = R_dep_total / R_total if R_total > 0 else 1.0
+            
+            # --- VISUALIZATION FIX: Minimum Deposition Probability ---
+            # Ensure at least 5% of events are depositions to guarantee growth,
+            # matching the training conditions.
+            MIN_DEPOSITION_PROB = 0.05
+            if num_agents > 0:
+                p_deposit = max(p_deposit, MIN_DEPOSITION_PROB)
             
             # Calculate physical time step (KMC residence time)
             dt = 1.0 / R_total if R_total > 0 else 0.0

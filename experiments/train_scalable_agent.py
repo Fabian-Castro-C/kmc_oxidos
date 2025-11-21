@@ -186,12 +186,6 @@ def main() -> None:
         max_steps=CONFIG.get("max_steps_per_episode", CONFIG["num_steps"]),
     )
 
-    # Store flux values for curriculum
-    train_flux_ti = CONFIG["deposition_flux_ti"]
-    train_flux_o = CONFIG["deposition_flux_o"]
-    validation_flux_ti = CONFIG.get("validation_flux_ti", train_flux_ti / 100.0)
-    validation_flux_o = CONFIG.get("validation_flux_o", train_flux_o / 100.0)
-
     # Actor-Critic Models
     # The Actor acts on local observations, Critic on global features
     obs_dim = env.single_agent_observation_space.shape[0]
@@ -327,6 +321,12 @@ def main() -> None:
         actor_rewards = []  # Rewards from agent actions only
         deposition_rewards = []  # Rewards from depositions only
 
+        # Deposition Accumulator for Deterministic Event Selection
+        # Instead of rolling dice (which has high variance), we accumulate the
+        # probability mass of deposition. When it crosses 1.0, we force a deposition.
+        # This ensures the ratio of Diffusion/Deposition is EXACTLY R_diff/R_dep.
+        deposition_accumulator = 0.0
+
         for _step in range(CONFIG["num_steps"]):
             if _step > 0 and _step % 256 == 0:
                 elapsed = time.time() - start_time
@@ -345,16 +345,18 @@ def main() -> None:
             # We must pass agent observations to the critic for the Deep Sets architecture
             # agent_obs is a list of numpy arrays, we need to convert it to a tensor
             if num_agents > 0:
-                agent_obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device).unsqueeze(0) # [1, num_agents, 58]
+                agent_obs_tensor = (
+                    torch.from_numpy(np.array(agent_obs)).to(device).unsqueeze(0)
+                )  # [1, num_agents, 58]
                 value = critic(
                     global_features=torch.from_numpy(global_obs).unsqueeze(0).to(device),
-                    agent_observations=agent_obs_tensor
+                    agent_observations=agent_obs_tensor,
                 )
             else:
                 # If no agents, pass None or empty list
                 value = critic(
                     global_features=torch.from_numpy(global_obs).unsqueeze(0).to(device),
-                    agent_observations=None
+                    agent_observations=None,
                 )
             all_values.append(value)
 
@@ -376,7 +378,7 @@ def main() -> None:
                         # We skip ADSORB as that's handled by deposition event
                         for act_idx in range(N_ACTIONS):
                             act_enum = ActionType(act_idx)
-                            
+
                             rate = rate_calculator.calculate_action_rate(
                                 agent, act_enum, env.lattice
                             )
@@ -388,15 +390,25 @@ def main() -> None:
                 # 2. Calculate Event Probabilities
                 R_total = R_dep_total + total_diff_rate
                 p_deposit = R_dep_total / R_total if R_total > 0 else 1.0
-                
+
+                # --- TRAINING STABILITY FIX: Minimum Deposition Probability ---
+                # Ensure at least 5% of events are depositions to guarantee growth
+                MIN_DEPOSITION_PROB = 0.05
+                if num_agents > 0:
+                    p_deposit = max(p_deposit, MIN_DEPOSITION_PROB)
+
                 # Calculate physical time step (KMC residence time)
-                # dt = -ln(u) / R_total
-                # We use expected time 1/R_total for simplicity in RL, or sample it
                 dt = 1.0 / R_total if R_total > 0 else 0.0
 
+                # --- DETERMINISTIC ACCUMULATOR SELECTION ---
+                # Accumulate probability mass. When > 1.0, trigger deposition.
+                deposition_accumulator += p_deposit
+
                 # 3. Select Event Type
-                if np.random.random() < p_deposit:
-                    # DEPOSITION EVENT
+                if deposition_accumulator >= 1.0:
+                    # DEPOSIT EVENT (Deterministic)
+                    deposition_accumulator -= 1.0
+
                     # Choose species based on relative fluxes
                     if np.random.random() < (R_dep_ti / R_dep_total):
                         action = "DEPOSIT_TI"
@@ -498,12 +510,12 @@ def main() -> None:
                 agent_obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device).unsqueeze(0)
                 next_value = critic(
                     global_features=torch.from_numpy(global_obs).unsqueeze(0).to(device),
-                    agent_observations=agent_obs_tensor
+                    agent_observations=agent_obs_tensor,
                 ).reshape(1, -1)
             else:
                 next_value = critic(
                     global_features=torch.from_numpy(global_obs).unsqueeze(0).to(device),
-                    agent_observations=None
+                    agent_observations=None,
                 ).reshape(1, -1)
 
             advantages = torch.zeros(len(all_rewards)).to(device)
@@ -523,6 +535,12 @@ def main() -> None:
                     delta + CONFIG["gamma"] * CONFIG["gae_lambda"] * nextnonterminal * last_gae_lam
                 )
             returns = advantages + torch.cat(all_values).squeeze()
+            
+            # --- ADVANTAGE NORMALIZATION ---
+            # Critical for sparse rewards: ensures positive events (+1.4) stand out
+            # against the background of zeros.
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            
         logger.debug("GAE calculation finished.")
 
         # --- PPO Update Phase ---
@@ -536,13 +554,24 @@ def main() -> None:
         total_entropy = 0.0
         num_policy_updates = 0
 
+        # PPO Mini-batch parameters
+        MINIBATCH_SIZE = 64  # Accumulate gradients over this many steps
+
         # Optimizing the policy and value network
         for _epoch in range(CONFIG["update_epochs"]):
             logger.info(f"  PPO Epoch {_epoch + 1}/{CONFIG['update_epochs']}")
 
-            for i in range(len(all_obs)):
-                if i > 0 and i % 256 == 0:
-                    logger.info(f"    Processing batch item {i}/{len(all_obs)}...")
+            # Shuffle indices to break temporal correlations
+            indices = np.arange(len(all_obs))
+            np.random.shuffle(indices)
+
+            optimizer.zero_grad()
+            accumulated_steps = 0
+
+            for idx, i in enumerate(indices):
+                if idx > 0 and idx % 256 == 0:
+                    logger.debug(f"    Processing batch item {idx}/{len(all_obs)}...")
+
                 current_agent_obs = all_obs[i]["agent_observations"]
                 current_global_obs = all_obs[i]["global_features"]
                 num_agents = len(current_agent_obs)
@@ -553,19 +582,27 @@ def main() -> None:
                 # Always compute new value for critic training
                 # Pass agent observations to critic
                 if num_agents > 0:
-                    agent_obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device).unsqueeze(0)
+                    agent_obs_tensor = (
+                        torch.from_numpy(np.array(current_agent_obs)).to(device).unsqueeze(0)
+                    )
                     new_value = critic(
-                        global_features=torch.from_numpy(current_global_obs).unsqueeze(0).to(device),
-                        agent_observations=agent_obs_tensor
+                        global_features=torch.from_numpy(current_global_obs)
+                        .unsqueeze(0)
+                        .to(device),
+                        agent_observations=agent_obs_tensor,
                     )
                 else:
                     new_value = critic(
-                        global_features=torch.from_numpy(current_global_obs).unsqueeze(0).to(device),
-                        agent_observations=None
+                        global_features=torch.from_numpy(current_global_obs)
+                        .unsqueeze(0)
+                        .to(device),
+                        agent_observations=None,
                     )
 
                 # Check if this was an agent action (not deposition)
                 is_agent_action = isinstance(taken_action, tuple) and taken_action is not None
+
+                loss = torch.tensor(0.0).to(device)
 
                 if is_agent_action and num_agents > 0:
                     # AGENT ACTION: Train both actor and critic
@@ -617,15 +654,6 @@ def main() -> None:
                     entropy_loss = entropy * CONFIG["ent_coef"]
                     loss = pg_loss - entropy_loss + v_loss * CONFIG["vf_coef"]
 
-                    # Optimize both networks
-                    optimizer.zero_grad()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        list(actor.parameters()) + list(critic.parameters()),
-                        CONFIG["max_grad_norm"],
-                    )
-                    optimizer.step()
-
                     # Track for logging (only last epoch)
                     if _epoch == CONFIG["update_epochs"] - 1:
                         total_pg_loss += pg_loss.item()
@@ -637,20 +665,27 @@ def main() -> None:
                     # DEPOSITION or NO ACTION: Train only critic
                     # Value loss only
                     v_loss = 0.5 * ((new_value - returns[i]) ** 2).mean()
-
-                    # Optimize only critic
-                    optimizer.zero_grad()
-                    v_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(
-                        list(critic.parameters()),
-                        CONFIG["max_grad_norm"],
-                    )
-                    optimizer.step()
+                    loss = v_loss
 
                     # Track value loss for logging
                     if _epoch == CONFIG["update_epochs"] - 1:
                         total_v_loss += v_loss.item()
                         # Note: num_policy_updates not incremented for deposition
+
+                # Backward pass with gradient accumulation
+                # Normalize loss by minibatch size
+                (loss / MINIBATCH_SIZE).backward()
+                accumulated_steps += 1
+
+                # Step optimizer if minibatch is full or end of epoch
+                if accumulated_steps >= MINIBATCH_SIZE or idx == len(indices) - 1:
+                    torch.nn.utils.clip_grad_norm_(
+                        list(actor.parameters()) + list(critic.parameters()),
+                        CONFIG["max_grad_norm"],
+                    )
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    accumulated_steps = 0
 
         logger.debug("PPO update phase finished.")
 

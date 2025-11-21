@@ -32,7 +32,7 @@ ENV_CONFIG = {
     # LOWERED TEMPERATURE FOR TRAINING VALIDATION:
     # At 600K, diffusion is 10^5x faster than deposition, so 2048 steps = 1 atom moving.
     # At 350K, diffusion is comparable to deposition, allowing film growth in 2048 steps.
-    "temperature": 300.0,  # Kelvin - Adjusted for RL timescale balance
+    "temperature": 600.0,  # Kelvin - Restored to paper value for correct physics
     "deposition_flux_ti": 5.0,  # ML/s - Increased flux to ensure growth
     "deposition_flux_o": 10.0,  # ML/s - Increased flux to ensure growth
     "validation_flux_ti": 1.0,  # ML/s
@@ -113,18 +113,18 @@ PPO_CONFIG = {
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
-    "gamma": 0.99,  # Discount factor - high for long-term planning
+    "gamma": 0.999,  # Discount factor - INCREASED to 0.999 to value long-term rewards (finding bonds)
     "gae_lambda": 0.95,  # GAE lambda - balances bias/variance
     # PPO-specific
     "clip_coef": 0.2,  # PPO clipping coefficient - standard value
     "target_kl": 0.015,  # Early stopping if KL divergence exceeds this (None to disable)
     # Loss coefficients
     "vf_coef": 0.5,  # Value function loss coefficient
-    "ent_coef": 0.01,  # Entropy bonus - Very low to allow policy convergence (was 0.2 - too high)
+    "ent_coef": 0.05,  # Entropy bonus - INCREASED to 0.05 to encourage exploration (was 0.01)
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
-    "update_epochs": 2,  # Number of epochs per PPO update (increased for better policy correction)
+    "update_epochs": 4,  # Number of epochs per PPO update (increased for better policy correction)
 }
 
 # ============================================================================
