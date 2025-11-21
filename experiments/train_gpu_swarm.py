@@ -7,6 +7,7 @@ same Actor-Critic architecture, PPO hyperparameters, and logging format.
 """
 
 import argparse
+import importlib.util
 import logging
 import sys
 import time
@@ -33,6 +34,14 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def load_config(config_path: str) -> dict:
+    """Load configuration from a Python file."""
+    spec = importlib.util.spec_from_file_location("config_module", config_path)
+    config_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(config_module)
+    return config_module.CONFIG
 
 
 def get_flux_for_update(update_num: int, config: dict) -> tuple[float, float]:
@@ -65,7 +74,18 @@ def train_gpu_swarm():
     parser.add_argument("--num_envs", type=int, default=64, help="Number of parallel environments")
     parser.add_argument("--total_timesteps", type=int, default=100000, help="Total training steps")
     parser.add_argument("--device", type=str, default="cuda", help="Device (cuda/cpu)")
+    parser.add_argument("--config", type=str, default=None, help="Path to configuration file")
     args = parser.parse_args()
+
+    # Load config if provided
+    if args.config:
+        logger.info(f"Loading configuration from: {args.config}")
+        config = load_config(args.config)
+        current_config = DEFAULT_CONFIG.copy()
+        current_config.update(config)
+    else:
+        logger.info("Using default configuration")
+        current_config = DEFAULT_CONFIG
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     logger.info(f"Training on {device}")
@@ -107,16 +127,25 @@ def train_gpu_swarm():
 
     for update in range(1, num_updates + 1):
         # --- Flux Schedule ---
-        flux_ti, flux_o = get_flux_for_update(update, DEFAULT_CONFIG)
+        flux_ti, flux_o = get_flux_for_update(update, current_config)
         n_sites = env.nx * env.ny
         R_dep_ti = flux_ti * n_sites
         R_dep_o = flux_o * n_sites
         R_dep_total = R_dep_ti + R_dep_o
 
-        logger.info(f"--- Training Update {update}/{num_updates} ---")
+        if update % 5 == 0:
+            logger.info(
+                f"\n--- Validation Update {update}/{num_updates}: Using flux Ti={flux_ti:.1f}, O={flux_o:.1f} ML/s ---"
+            )
+        else:
+            logger.info(
+                f"\n--- Training Update {update}/{num_updates}: Using flux Ti={flux_ti:.1f}, O={flux_o:.1f} ML/s ---"
+            )
+
         logger.info(
             f"  Deposition Rates: R_Ti={R_dep_ti:.2f}/s, R_O={R_dep_o:.2f}/s, R_total={R_dep_total:.2f}/s"
         )
+        logger.info("  Using Physics-Based Competition (R_diff vs R_dep) and Action Reweighting")
 
         # Storage for rollout
         batch_lattices = []  # Store state to recompute obs
@@ -286,12 +315,23 @@ def train_gpu_swarm():
 
             # Log for first env
             if step < 30:
+                # Count agents (non-vacant, non-substrate)
+                # env.lattices is (B, X, Y, Z)
+                # We only care about env 0
+                lat0 = env.lattices[0]
+                n_agents = (
+                    ((lat0 != SpeciesType.VACANT.value) & (lat0 != SpeciesType.SUBSTRATE.value))
+                    .sum()
+                    .item()
+                )
+
                 detailed_log_steps.append(
                     {
                         "step": step,
                         "type": log_action_type,
                         "details": log_details,
                         "reward": step_rewards[0].item(),
+                        "n_agents": n_agents,
                     }
                 )
 
@@ -453,9 +493,25 @@ def train_gpu_swarm():
         # Detailed Step Logging (First 30 steps of first env)
         logger.info("--- First 30 Steps (Env 0) ---")
         for log in detailed_log_steps:
-            logger.info(
-                f"  [{log['step']:3d}] {log['type']:<15} | {log['details']:<40} | Reward: {log['reward']:+.4f}"
-            )
+            # Format similar to train_scalable_agent.py
+            # [  0] DEPOSIT Ti → Reward: +2.000, Agents: 3
+            # [  0] AGENT[ 0] DIFFUSE_Y_POS → Reward: +0.000, Agents: 3
+
+            if log["type"] == "Deposition":
+                # Parse details "Deposit Ti at (x,y,z)"
+                parts = log["details"].split()
+                species = parts[1]
+                logger.info(
+                    f"  [{log['step']:3d}] DEPOSIT {species:<2}            → Reward: {log['reward']:+6.3f}, Agents: {log['n_agents']:3d} | {log['details']}"
+                )
+            else:
+                # Agent Action
+                # details: "Agent at (x,y,z) -> ACTION_NAME"
+                parts = log["details"].split(" -> ")
+                action_name = parts[1]
+                logger.info(
+                    f"  [{log['step']:3d}] AGENT ACTION {action_name:<14} → Reward: {log['reward']:+6.3f}, Agents: {log['n_agents']:3d} | {log['details']}"
+                )
 
         writer.add_scalar("charts/fps", fps, global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
