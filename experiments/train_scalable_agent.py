@@ -32,6 +32,7 @@ from src.data.tio2_parameters import TiO2Parameters
 from src.rl.action_selection import select_action_gumbel_max
 from src.rl.action_space import N_ACTIONS, ActionType
 from src.rl.agent_env import AgentBasedTiO2Env
+from src.rl.rate_calculator import ActionRateCalculator
 from src.rl.shared_policy import Actor, Critic
 
 # Configure logging
@@ -288,6 +289,7 @@ def main() -> None:
         all_values = []  # List of tensors
         all_action_masks = []  # List of action masks
         all_diffusion_logits = []  # Cached diffusion logits to avoid recalculation
+        all_log_rates = []  # Cached log rates for reweighting during PPO update
 
         next_obs, _ = env.reset()
 
@@ -298,22 +300,22 @@ def main() -> None:
         # --- Rollout Collection Phase ---
         logger.debug("Collecting rollouts...")
 
-        # Calculate deposition probability for this rollout based on flux
-        # Using Poisson model: P(deposition) = 1 - exp(-λ), where λ = flux * n_sites * Δt
-        n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
-        delta_t = 0.01  # Time step (seconds)
-        lambda_ti = current_flux_ti * n_sites * delta_t
-        lambda_o = current_flux_o * n_sites * delta_t
-        lambda_total = lambda_ti + lambda_o
-        p_deposit = 1.0 - np.exp(-lambda_total)
+        # Initialize Rate Calculator for Physics-Guided RL
+        rate_calculator = ActionRateCalculator(temperature=env.temperature)
 
-        # Log deposition parameters at the start of each logged update
+        # Calculate Deposition Rate (R_dep)
+        n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
+        R_dep_ti = current_flux_ti * n_sites  # atoms/s
+        R_dep_o = current_flux_o * n_sites  # atoms/s
+        R_dep_total = R_dep_ti + R_dep_o
+
+        # Log deposition parameters
         if should_log_this_update:
             logger.info(
-                f"  Deposition params: λ_Ti={lambda_ti:.3f}, λ_O={lambda_o:.3f}, λ_total={lambda_total:.3f}, P(deposit)={p_deposit:.1%}"
+                f"  Deposition Rates: R_Ti={R_dep_ti:.2f}/s, R_O={R_dep_o:.2f}/s, R_total={R_dep_total:.2f}/s"
             )
             logger.info(
-                f"  Expected: ~{int(p_deposit * CONFIG['num_steps'])} depositions, ~{int((1 - p_deposit) * CONFIG['num_steps'])} agent actions per rollout"
+                "  Using Physics-Based Competition (R_diff vs R_dep) and Action Reweighting"
             )
 
         # Track statistics for logging
@@ -326,7 +328,9 @@ def main() -> None:
             if _step > 0 and _step % 256 == 0:
                 elapsed = time.time() - start_time
                 steps_per_sec = global_step / elapsed if elapsed > 0 else 0
-                logger.info(f"  Rollout step {_step}/{CONFIG['num_steps']} | SPS: {steps_per_sec:.1f}")
+                logger.info(
+                    f"  Rollout step {_step}/{CONFIG['num_steps']} | SPS: {steps_per_sec:.1f}"
+                )
             global_step += 1
             all_dones.append(next_done)
             all_obs.append({"agent_observations": agent_obs, "global_features": global_obs})
@@ -344,11 +348,47 @@ def main() -> None:
 
             # Decide between DEPOSITION (external event) or AGENT ACTION
             with torch.no_grad():
-                # Roll the dice: does a deposition occur this step?
+                # 1. Calculate Total Diffusion Rate (R_diff)
+                # Sum of physical rates of all possible moves for all agents
+                # This ensures competition is physically grounded
+                current_diffusion_rates = []
+                total_diff_rate = 0.0
+
+                if num_agents > 0:
+                    # Calculate rates for all agents (needed for reweighting anyway)
+                    # Shape: [num_agents, action_dim]
+                    agent_rates = np.zeros((num_agents, N_ACTIONS), dtype=np.float32)
+
+                    for i, agent in enumerate(env.agents):
+                        # Calculate rates for all 6 diffusion directions + Desorb
+                        # We skip ADSORB as that's handled by deposition event
+                        for act_idx in range(N_ACTIONS):
+                            act_enum = ActionType(act_idx)
+                            # Only calculate for diffusion/desorption
+                            if act_enum in [
+                                ActionType.ADSORB_TI,
+                                ActionType.ADSORB_O,
+                                ActionType.REACT_TIO2,
+                            ]:
+                                continue
+
+                            rate = rate_calculator.calculate_action_rate(
+                                agent, act_enum, env.lattice
+                            )
+                            agent_rates[i, act_idx] = rate
+                            total_diff_rate += rate
+
+                    current_diffusion_rates = agent_rates
+
+                # 2. Calculate Event Probabilities
+                R_total = R_dep_total + total_diff_rate
+                p_deposit = R_dep_total / R_total if R_total > 0 else 1.0
+
+                # 3. Select Event Type
                 if np.random.random() < p_deposit:
                     # DEPOSITION EVENT
                     # Choose species based on relative fluxes
-                    if np.random.random() < (lambda_ti / lambda_total):
+                    if np.random.random() < (R_dep_ti / R_dep_total):
                         action = "DEPOSIT_TI"
                     else:
                         action = "DEPOSIT_O"
@@ -356,6 +396,7 @@ def main() -> None:
                     all_actions.append(action)
                     all_action_masks.append(np.zeros((0, action_dim), dtype=bool))
                     all_diffusion_logits.append(np.zeros((0, action_dim), dtype=np.float32))
+                    all_log_rates.append(None)
                     all_logprobs.append(torch.tensor(0.0).to(device))  # No policy decision
 
                     # Execute deposition
@@ -366,15 +407,27 @@ def main() -> None:
                 elif num_agents > 0:
                     # AGENT ACTION (surface kinetics)
                     obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device)
-                    diffusion_logits = actor(obs_tensor)  # [num_agents, num_actions]
+                    policy_logits = actor(obs_tensor)  # [num_agents, num_actions]
 
                     # Get, save, and apply the action mask
                     action_mask = env.get_action_mask()
                     all_action_masks.append(action_mask)
                     action_mask_tensor = torch.from_numpy(action_mask).to(device)
 
-                    # Cache the diffusion logits BEFORE masking for reuse in PPO
-                    all_diffusion_logits.append(diffusion_logits.cpu().numpy())
+                    # --- REWEIGHTING: Combine Policy with Physics ---
+                    # P(a) ~ Policy(a) * Rate(a)
+                    # Logit(a) = Policy_Logit(a) + log(Rate(a))
+
+                    # Add small epsilon to avoid log(0)
+                    log_rates = np.log(current_diffusion_rates + 1e-10)
+                    log_rates_tensor = torch.from_numpy(log_rates).to(device)
+
+                    # Cache the RAW policy logits (for PPO update, we usually train the policy part)
+                    all_diffusion_logits.append(policy_logits.cpu().numpy())
+                    all_log_rates.append(log_rates)
+
+                    # Effective logits for selection
+                    diffusion_logits = policy_logits + log_rates_tensor
 
                     diffusion_logits[~action_mask_tensor] = -1e9  # Mask out invalid actions
 
@@ -492,7 +545,15 @@ def main() -> None:
                     # AGENT ACTION: Train both actor and critic
                     # Recalculate log_probs, entropy for actor
                     obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device)
-                    diffusion_logits = actor(obs_tensor)
+                    policy_logits = actor(obs_tensor)
+
+                    # Retrieve cached log rates for reweighting
+                    log_rates = all_log_rates[i]
+                    if log_rates is not None:
+                        log_rates_tensor = torch.from_numpy(log_rates).to(device)
+                        diffusion_logits = policy_logits + log_rates_tensor
+                    else:
+                        diffusion_logits = policy_logits
 
                     # Apply the saved mask for this specific step
                     action_mask = torch.from_numpy(all_action_masks[i]).to(device)

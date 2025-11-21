@@ -104,82 +104,114 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     """
-    Centralized Critic (Value) Network.
+    Centralized Critic (Value) Network with Deep Sets Architecture.
 
-    Estimates the value of a global state representation. The global state is
-    formed by aggregating the local observations of all agents (e.g., by mean).
+    This critic is designed to be invariant to the number of agents (permutation invariant).
+    It processes each agent's observation independently and then aggregates them
+    using a symmetric pooling operation (Max Pooling) to form a global context vector.
+    This allows the critic to scale from small training lattices to large inference lattices.
 
-    Architecture (from SwarmThinkers paper):
-    - Input: Aggregated observation vector (58 dims)
-    - 5 hidden layers with 256 units each (configurable)
-    - Activation: ReLU or tanh (configurable)
-    - Output: Single state value (1 dim)
+    Architecture:
+    1. Agent Encoder (Shared): Maps local obs -> latent vector
+    2. Symmetric Pooling: Max(latent vectors) -> Swarm Context
+    3. Global Fusion: Concat(Swarm Context, Global Features) -> Value Head
+    4. Value Head: MLP -> Value
     """
 
     def __init__(
         self,
         obs_dim: int = 58,
+        global_obs_dim: int = 12,
         hidden_dims: list[int] | None = None,
         activation: str = "relu",
     ) -> None:
-        """
-        Initialize the Critic network.
-
-        Args:
-            obs_dim: Dimension of the aggregated observation vector.
-            hidden_dims: List of hidden layer dimensions. If None, uses paper defaults.
-            activation: Activation function ('relu' or 'tanh').
-        """
         super().__init__()
-        self.obs_dim = obs_dim
         self.hidden_dims = hidden_dims or DEFAULT_HIDDEN_DIMS
-        self.activation = activation
+        self.activation_fn = nn.ReLU() if activation == "relu" else nn.Tanh()
 
-        layers = self._build_layers(obs_dim, 1)  # Output is a single value
-        self.network = nn.Sequential(*layers)
-        self._initialize_weights()
+        # 1. Agent Encoder: Processes each agent's local observation
+        # We use a smaller network for the encoder to keep parameter count reasonable
+        encoder_hidden = 128
+        self.agent_encoder = nn.Sequential(
+            nn.Linear(obs_dim, encoder_hidden),
+            self.activation_fn,
+            nn.Linear(encoder_hidden, encoder_hidden),
+            self.activation_fn,
+        )
 
-    def _get_activation(self) -> nn.Module:
-        """Get activation function."""
-        if self.activation.lower() == "relu":
-            return nn.ReLU()
-        elif self.activation.lower() == "tanh":
-            return nn.Tanh()
-        elif self.activation.lower() == "elu":
-            return nn.ELU()
-        else:
-            raise ValueError(f"Unknown activation: {self.activation}")
-
-    def _build_layers(self, input_dim: int, output_dim: int) -> list[nn.Module]:
-        """Construct the network layers."""
+        # 2. Value Head: Processes the combined global state
+        # Input = Swarm Context (encoder_hidden) + Global Features (global_obs_dim)
+        input_dim = encoder_hidden + global_obs_dim
         layers = []
         prev_dim = input_dim
 
-        for hidden_dim in self.hidden_dims:
-            layers.extend([nn.Linear(prev_dim, hidden_dim), self._get_activation()])
-            prev_dim = hidden_dim
+        for dim in self.hidden_dims:
+            layers.extend([nn.Linear(prev_dim, dim), self.activation_fn])
+            prev_dim = dim
 
-        layers.append(nn.Linear(prev_dim, output_dim))
-        return layers
+        layers.append(nn.Linear(prev_dim, 1))
+        self.value_head = nn.Sequential(*layers)
+
+        self._initialize_weights()
 
     def _initialize_weights(self) -> None:
-        """Initialize network weights using Xavier initialization."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def forward(self, aggregated_observation: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        global_features: torch.Tensor,
+        agent_observations: torch.Tensor | list[torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         """
-        Forward pass: maps an aggregated observation to a state value.
+        Forward pass for the centralized critic.
 
         Args:
-            aggregated_observation: A tensor representing the global state,
-                                    e.g., the mean of all agent observations.
-                                    Shape: [batch_size, obs_dim].
+            global_features: Batch of global features [batch_size, global_obs_dim]
+            agent_observations:
+                - If Tensor: [batch_size, max_agents, obs_dim] (padded)
+                - If List: List of [n_agents, obs_dim] tensors (variable length)
+                - If None: Assumes 0 agents (empty surface)
 
         Returns:
-            The estimated state value. Shape: [batch_size, 1].
+            State value estimates [batch_size, 1]
         """
-        return self.network(aggregated_observation)
+        batch_size = global_features.shape[0]
+        device = global_features.device
+
+        # Handle case with no agents (e.g. initial empty lattice)
+        if agent_observations is None or (
+            isinstance(agent_observations, list) and len(agent_observations) == 0
+        ):
+            swarm_context = torch.zeros(batch_size, 128, device=device)
+
+        elif isinstance(agent_observations, list):
+            # Variable number of agents per batch element
+            swarm_contexts = []
+            for _i, obs in enumerate(agent_observations):
+                if obs.shape[0] == 0:
+                    # No agents in this environment
+                    ctx = torch.zeros(128, device=device)
+                else:
+                    # Encode all agents: [n_agents, 128]
+                    encoded = self.agent_encoder(obs)
+                    # Max Pooling: [128]
+                    ctx, _ = torch.max(encoded, dim=0)
+                swarm_contexts.append(ctx)
+            swarm_context = torch.stack(swarm_contexts)
+
+        else:
+            # Tensor input [batch, max_agents, obs_dim]
+            # Assuming 0-padding for non-existent agents is handled by masking or ignored
+            # For simplicity, if using tensor, we assume all agents are valid or padding doesn't affect max significantly
+            # (Ideally, we should use a mask)
+            encoded = self.agent_encoder(agent_observations)  # [batch, max_agents, 128]
+            swarm_context, _ = torch.max(encoded, dim=1)  # [batch, 128]
+
+        # Concatenate Swarm Context with Global Features
+        combined_state = torch.cat([swarm_context, global_features], dim=1)
+
+        return self.value_head(combined_state)
