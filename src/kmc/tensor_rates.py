@@ -45,7 +45,7 @@ class TensorRateCalculator:
         self.nu0 = 1e13  # Attempt frequency (Hz)
 
         # Energy parameters
-        self.E_diff_base = params.e_diff_ti  # Base diffusion barrier
+        self.E_diff_base = params.ea_diff_ti  # Base diffusion barrier
         self.E_bond = params.bond_energy_ti_o  # Bond energy contribution
 
     def calculate_diffusion_rates(self, lattice_state: torch.Tensor):
