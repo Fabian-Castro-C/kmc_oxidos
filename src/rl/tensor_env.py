@@ -79,6 +79,9 @@ class TensorTiO2Env:
         
         # Pre-compute observation kernels
         self._init_observation_kernels()
+        
+        # Track previous Grand Potential for reward calculation
+        self.prev_omega = torch.zeros(num_envs, device=self.device)
 
     def _init_observation_kernels(self):
         """Initialize convolution kernels for observation generation."""
@@ -107,7 +110,62 @@ class TensorTiO2Env:
         self.lattices[:, :, :, 0] = SpeciesType.SUBSTRATE.value
         self.steps.fill_(0)
         
+        # Reset Omega
+        self.prev_omega = self._calculate_grand_potential()
+        
         return self._get_observations()
+
+    def _calculate_grand_potential(self):
+        """
+        Calculate Grand Potential (Omega = E - mu*N) for all environments.
+        Returns: (Batch,) tensor of Omega values in eV.
+        """
+        # 1. Count Species (N_Ti, N_O)
+        # lattice: (B, X, Y, Z)
+        n_ti = (self.lattices == SpeciesType.TI.value).sum(dim=(1,2,3)).float()
+        n_o = (self.lattices == SpeciesType.O.value).sum(dim=(1,2,3)).float()
+        
+        # 2. Calculate Total Energy (Sum of Bonds)
+        # One-hot: (B, 4, X, Y, Z)
+        one_hot = torch.zeros((self.num_envs, 4, self.nx, self.ny, self.nz), device=self.device)
+        one_hot.scatter_(1, self.lattices.unsqueeze(1).long(), 1.0)
+        
+        # Channels: 1=Ti, 2=O, 3=Substrate
+        ti = one_hot[:, 1:2]
+        o = one_hot[:, 2:3]
+        sub = one_hot[:, 3:4]
+        
+        # Neighbor kernel (sum of 6 neighbors)
+        k = self.physics.kernel_coordination # (1, 1, 3, 3, 3)
+        
+        # Convolve to find neighbors
+        # Padding=1 handles boundaries (open)
+        ti_neighbors = torch.nn.functional.conv3d(ti, k, padding=1)
+        o_neighbors = torch.nn.functional.conv3d(o, k, padding=1)
+        sub_neighbors = torch.nn.functional.conv3d(sub, k, padding=1)
+        
+        # Calculate Bond Energies
+        # Ti-Ti: Sum(Ti * Ti_neighbors) / 2
+        e_ti_ti = (ti * ti_neighbors).sum(dim=(1,2,3,4)) * 0.5 * self.params.bond_energy_ti_ti
+        
+        # O-O: Sum(O * O_neighbors) / 2
+        e_o_o = (o * o_neighbors).sum(dim=(1,2,3,4)) * 0.5 * self.params.bond_energy_o_o
+        
+        # Ti-O: Sum(Ti * O_neighbors) (No 0.5 because distinct sets)
+        e_ti_o = (ti * o_neighbors).sum(dim=(1,2,3,4)) * self.params.bond_energy_ti_o
+        
+        # Substrate Interactions (Assume similar to Ti-O for adhesion)
+        # Ti-Substrate
+        e_ti_sub = (ti * sub_neighbors).sum(dim=(1,2,3,4)) * self.params.bond_energy_ti_o
+        # O-Substrate
+        e_o_sub = (o * sub_neighbors).sum(dim=(1,2,3,4)) * self.params.bond_energy_ti_o
+        
+        total_energy = e_ti_ti + e_o_o + e_ti_o + e_ti_sub + e_o_sub
+        
+        # Grand Potential: E - mu*N
+        omega = total_energy - (self.params.mu_ti * n_ti) - (self.params.mu_o * n_o)
+        
+        return omega
 
     def _get_observations(self):
         """
@@ -257,9 +315,18 @@ class TensorTiO2Env:
         if mask_desorb.any():
             self.lattices[b_idx[mask_desorb], x[mask_desorb], y[mask_desorb], z[mask_desorb]] = SpeciesType.VACANT.value
         
+        # Calculate Rewards
+        current_omega = self._calculate_grand_potential()
+        delta_omega = current_omega - self.prev_omega
+        
+        # Reward = -DeltaOmega (favor stability)
+        # Scaled by 5.0 as in SwarmThinkers
+        rewards = -delta_omega / 5.0
+        
+        self.prev_omega = current_omega
+        
         self.steps += 1
         terminated = (self.steps >= self.max_steps)
-        rewards = torch.zeros(self.num_envs, device=self.device)
         
         if terminated.any():
             self.reset_envs(torch.where(terminated)[0])
@@ -271,3 +338,15 @@ class TensorTiO2Env:
         self.lattices[env_indices].fill_(SpeciesType.VACANT.value)
         self.lattices[env_indices, :, :, 0] = SpeciesType.SUBSTRATE.value
         self.steps[env_indices] = 0
+        
+        # Reset Omega for these envs
+        # We need to recalculate for these specific indices
+        # But _calculate_grand_potential returns all.
+        # Efficient way: just update the slice
+        # Or simpler: just recalculate all (expensive but safe)
+        # Or better: implement _calculate_grand_potential to accept indices?
+        # For now, let's just recalculate all and slice, or assume reset state is known.
+        # Reset state (empty) has Omega = 0 (if we ignore substrate energy or it cancels out)
+        # Actually, substrate has energy? No, we only count bonds involving deposited atoms.
+        # So empty lattice has E=0, N=0 -> Omega=0.
+        self.prev_omega[env_indices] = 0.0
