@@ -339,11 +339,20 @@ def main() -> None:
             num_agents = len(agent_obs)
 
             # Centralized Critic Value
+            # We must pass agent observations to the critic for the Deep Sets architecture
+            # agent_obs is a list of numpy arrays, we need to convert it to a tensor
             if num_agents > 0:
-                value = critic(torch.from_numpy(global_obs).unsqueeze(0).to(device))
+                agent_obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device).unsqueeze(0) # [1, num_agents, 58]
+                value = critic(
+                    global_features=torch.from_numpy(global_obs).unsqueeze(0).to(device),
+                    agent_observations=agent_obs_tensor
+                )
             else:
-                # If no agents, the value is estimated from a zero-vector observation
-                value = critic(torch.zeros(1, global_obs_dim).to(device))
+                # If no agents, pass None or empty list
+                value = critic(
+                    global_features=torch.from_numpy(global_obs).unsqueeze(0).to(device),
+                    agent_observations=None
+                )
             all_values.append(value)
 
             # Decide between DEPOSITION (external event) or AGENT ACTION
@@ -485,11 +494,16 @@ def main() -> None:
         with torch.no_grad():
             # Get value of the last state
             if len(agent_obs) > 0:
-                next_value = critic(torch.from_numpy(global_obs).unsqueeze(0).to(device)).reshape(
-                    1, -1
-                )
+                agent_obs_tensor = torch.from_numpy(np.array(agent_obs)).to(device).unsqueeze(0)
+                next_value = critic(
+                    global_features=torch.from_numpy(global_obs).unsqueeze(0).to(device),
+                    agent_observations=agent_obs_tensor
+                ).reshape(1, -1)
             else:
-                next_value = critic(torch.zeros(1, global_obs_dim).to(device)).reshape(1, -1)
+                next_value = critic(
+                    global_features=torch.from_numpy(global_obs).unsqueeze(0).to(device),
+                    agent_observations=None
+                ).reshape(1, -1)
 
             advantages = torch.zeros(len(all_rewards)).to(device)
             last_gae_lam = 0
@@ -536,7 +550,18 @@ def main() -> None:
                 taken_action = all_actions[i]
 
                 # Always compute new value for critic training
-                new_value = critic(torch.from_numpy(current_global_obs).unsqueeze(0).to(device))
+                # Pass agent observations to critic
+                if num_agents > 0:
+                    agent_obs_tensor = torch.from_numpy(np.array(current_agent_obs)).to(device).unsqueeze(0)
+                    new_value = critic(
+                        global_features=torch.from_numpy(current_global_obs).unsqueeze(0).to(device),
+                        agent_observations=agent_obs_tensor
+                    )
+                else:
+                    new_value = critic(
+                        global_features=torch.from_numpy(current_global_obs).unsqueeze(0).to(device),
+                        agent_observations=None
+                    )
 
                 # Check if this was an agent action (not deposition)
                 is_agent_action = isinstance(taken_action, tuple) and taken_action is not None

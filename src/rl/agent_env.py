@@ -533,6 +533,10 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
                         # Found valid deposition site with support (below is SUBSTRATE, TI, or O)
                         success, reason = self.lattice.deposit_atom(site_idx, species)
                         if success:
+                            # Update species counts
+                            self._species_counts[species] += 1
+                            self._species_counts[SpeciesType.VACANT] -= 1
+
                             # Update only affected agents incrementally
                             self._update_affected_agents([site_idx])
                             
@@ -669,20 +673,27 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         bond_density = total_bonds / total_sites
 
         # Global features with rich thermodynamic information
+        # NOTE: We normalize these features to be roughly in range [-1, 1] or [0, 1]
+        # to improve Critic convergence.
+        
+        # Energy normalization: ~ -10 eV per atom
+        norm_energy = total_energy / (num_atoms * 10.0 + 1e-5)
+        norm_omega = grand_potential / (num_atoms * 10.0 + 1e-5)
+        
         global_features = np.array(
             [
-                self._calculate_mean_height(),
-                self._calculate_height_std(),
-                self._species_counts[SpeciesType.TI],
-                self._species_counts[SpeciesType.O],
-                self._species_counts[SpeciesType.VACANT],
-                total_energy,  # NEW: System energy
-                grand_potential,  # NEW: Grand potential Ω
-                float(total_bonds),  # NEW: Total number of bonds
-                avg_coordination,  # NEW: Average coordination number
-                bond_density,  # NEW: Bond density (structural compactness)
-                float(num_ti_o_bonds),  # NEW: Ti-O bonds (most important for TiO2)
-                float(num_atoms),  # NEW: Total atoms
+                self._calculate_mean_height() / 20.0, # Normalize by max expected height
+                self._calculate_height_std() / 5.0,   # Normalize by max expected roughness
+                self._species_counts[SpeciesType.TI] / (total_sites + 1e-5), # Density
+                self._species_counts[SpeciesType.O] / (total_sites + 1e-5),  # Density
+                self._species_counts[SpeciesType.VACANT] / (total_sites + 1e-5), # Density
+                norm_energy,  # Normalized System energy
+                norm_omega,  # Normalized Grand potential Ω
+                bond_density / 6.0,  # Normalized Bond density (max ~6)
+                avg_coordination / 6.0,  # Normalized Average coordination
+                float(num_ti_o_bonds) / (total_bonds + 1e-5),  # Fraction of Ti-O bonds
+                float(num_atoms) / (total_sites + 1e-5),  # Coverage fraction
+                0.0, # Placeholder to keep dim=12 (was total_atoms)
             ],
             dtype=np.float32,
         )
@@ -714,19 +725,14 @@ class AgentBasedTiO2Env(gym.Env):  # type: ignore[misc]
         # Calculate delta from previous state (prev_omega was updated after any deposition)
         delta_omega = current_omega - self.prev_omega
 
-        # Reward = -ΔΩ (favor stability) - step_penalty (encourage efficiency)
-        reward = -delta_omega - self._step_penalty
+        # Reward = -ΔΩ (favor stability)
+        # We remove artificial step penalties to allow the agent to explore the energy landscape
+        # purely based on thermodynamic gradients.
+        reward = -delta_omega
 
         # Scale reward to reduce variance (rewards range from ~-10 to +13 eV)
         # Scaling by 5.0 brings them to ~-2 to +2.6 range, easier for RL to learn
         reward = reward / 5.0
-
-        # Anti-repetition penalty: discourage immediate DEPOSIT→DESORB cycles
-        # This is reward shaping, NOT physics violation - thermodynamics still intact
-        if len(self._action_type_history) >= 2 and (
-            self._action_type_history[-2] == "DEPOSIT" and self._action_type_history[-1] == "DESORB"
-        ):
-            reward -= 0.1  # Scaled penalty to match scaled rewards
 
         # Update previous grand potential for next step
         self.prev_omega = current_omega
