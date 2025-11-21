@@ -535,12 +535,12 @@ def main() -> None:
                     delta + CONFIG["gamma"] * CONFIG["gae_lambda"] * nextnonterminal * last_gae_lam
                 )
             returns = advantages + torch.cat(all_values).squeeze()
-            
+
             # --- ADVANTAGE NORMALIZATION ---
             # Critical for sparse rewards: ensures positive events (+1.4) stand out
             # against the background of zeros.
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-            
+
         logger.debug("GAE calculation finished.")
 
         # --- PPO Update Phase ---
