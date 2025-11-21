@@ -66,34 +66,54 @@ DEFAULT_CONFIG = {
     "deposition_flux_ti": 1.0,
     "deposition_flux_o": 2.0,
     "lattice_size": (20, 20, 20),  # Default for GPU
+    "total_timesteps": 100000,
+    "num_envs": 64,
 }
 
 
 def train_gpu_swarm():
     parser = argparse.ArgumentParser(description="GPU SwarmThinkers Training")
-    parser.add_argument("--num_envs", type=int, default=64, help="Number of parallel environments")
-    parser.add_argument("--total_timesteps", type=int, default=100000, help="Total training steps")
-    parser.add_argument("--device", type=str, default="cuda", help="Device (cuda/cpu)")
     parser.add_argument("--config", type=str, default=None, help="Path to configuration file")
+    parser.add_argument("--num_envs", type=int, default=None, help="Number of parallel environments (overrides config)")
+    parser.add_argument("--total_timesteps", type=int, default=None, help="Total training steps (overrides config)")
+    parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu) (overrides config)")
     args = parser.parse_args()
 
-    # Load config if provided
+    # 1. Start with Defaults
+    current_config = DEFAULT_CONFIG.copy()
+
+    # 2. Load Config File if provided
     if args.config:
         logger.info(f"Loading configuration from: {args.config}")
-        config = load_config(args.config)
-        current_config = DEFAULT_CONFIG.copy()
-        current_config.update(config)
+        file_config = load_config(args.config)
+        current_config.update(file_config)
+    
+    # 3. Override with CLI args if provided
+    if args.num_envs is not None:
+        current_config["num_envs"] = args.num_envs
+    if args.total_timesteps is not None:
+        current_config["total_timesteps"] = args.total_timesteps
+    
+    # Device handling
+    if args.device:
+        device_name = args.device
+    elif "device" in current_config:
+        device_name = current_config["device"]
     else:
-        logger.info("Using default configuration")
-        current_config = DEFAULT_CONFIG
-
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+        device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    device = torch.device(device_name)
     logger.info(f"Training on {device}")
 
+    # Extract parameters
+    num_envs = current_config.get("num_envs", 64)
+    total_timesteps = current_config.get("total_timesteps", 100000)
+    lattice_size = current_config["lattice_size"]
+
     # 1. Initialize Environment
-    logger.info(f"Initializing {args.num_envs} parallel environments...")
+    logger.info(f"Initializing {num_envs} parallel environments...")
     env = TensorTiO2Env(
-        num_envs=args.num_envs, lattice_size=DEFAULT_CONFIG["lattice_size"], device=args.device
+        num_envs=num_envs, lattice_size=lattice_size, device=device_name
     )
 
     # 2. Initialize Networks
@@ -104,23 +124,23 @@ def train_gpu_swarm():
     critic = Critic(obs_dim=obs_dim, global_obs_dim=global_obs_dim).to(device)
 
     optimizer = optim.Adam(
-        list(actor.parameters()) + list(critic.parameters()), lr=DEFAULT_CONFIG["learning_rate"]
+        list(actor.parameters()) + list(critic.parameters()), lr=current_config["learning_rate"]
     )
 
     # TensorBoard
-    run_name = f"gpu_swarm_{int(time.time())}"
+    run_name = current_config.get("run_name", f"gpu_swarm_{int(time.time())}")
     writer = SummaryWriter(f"experiments/results/train/{run_name}")
     logger.info(f"Logging to experiments/results/train/{run_name}")
 
     # 3. Training Loop
-    num_updates = args.total_timesteps // (args.num_envs * DEFAULT_CONFIG["num_steps"])
+    num_updates = total_timesteps // (num_envs * current_config["num_steps"])
     logger.info(f"Starting training: {num_updates} updates")
 
     start_time = time.time()
     global_step = 0
 
     # Deposition Accumulators (per environment)
-    deposition_acc = torch.zeros(args.num_envs, device=device)
+    deposition_acc = torch.zeros(num_envs, device=device)
 
     # Initial Reset
     obs = env.reset()  # (Batch, 51, X, Y, Z)
@@ -165,8 +185,8 @@ def train_gpu_swarm():
         n_agent_actions = 0
 
         # --- Rollout Phase ---
-        for step in range(DEFAULT_CONFIG["num_steps"]):
-            global_step += args.num_envs
+        for step in range(current_config["num_steps"]):
+            global_step += num_envs
 
             # Store Lattice State (int8, compact)
             batch_lattices.append(env.lattices.clone())
@@ -348,8 +368,8 @@ def train_gpu_swarm():
             next_value = b_values[-1]  # Approx
             advantages = torch.zeros_like(b_rewards)
             lastgaelam = 0
-            for t in reversed(range(DEFAULT_CONFIG["num_steps"])):
-                if t == DEFAULT_CONFIG["num_steps"] - 1:
+            for t in reversed(range(current_config["num_steps"])):
+                if t == current_config["num_steps"] - 1:
                     nextnonterminal = 1.0
                     nextvalues = next_value
                 else:
@@ -357,13 +377,13 @@ def train_gpu_swarm():
                     nextvalues = b_values[t + 1]
                 delta = (
                     b_rewards[t]
-                    + DEFAULT_CONFIG["gamma"] * nextvalues * nextnonterminal
+                    + current_config["gamma"] * nextvalues * nextnonterminal
                     - b_values[t]
                 )
                 advantages[t] = lastgaelam = (
                     delta
-                    + DEFAULT_CONFIG["gamma"]
-                    * DEFAULT_CONFIG["gae_lambda"]
+                    + current_config["gamma"]
+                    * current_config["gae_lambda"]
                     * nextnonterminal
                     * lastgaelam
                 )
@@ -378,8 +398,8 @@ def train_gpu_swarm():
         b_values_flat = b_values.view(-1)
 
         # Optimization
-        inds = np.arange(args.num_envs * DEFAULT_CONFIG["num_steps"])
-        for epoch in range(DEFAULT_CONFIG["update_epochs"]):
+        inds = np.arange(num_envs * current_config["num_steps"])
+        for epoch in range(current_config["update_epochs"]):
             np.random.shuffle(inds)
             minibatch_size = 256  # Adjust based on VRAM
 
@@ -396,7 +416,7 @@ def train_gpu_swarm():
                 env.num_envs = len(mb_inds)
                 new_obs = env._get_observations()  # (MB, 51, X, Y, Z)
                 env.lattices = original_lattices
-                env.num_envs = args.num_envs
+                env.num_envs = num_envs
 
                 # Prepare inputs
                 mb_agent_obs = new_obs.permute(0, 2, 3, 4, 1).reshape(len(mb_inds), -1, 51)
@@ -451,7 +471,7 @@ def train_gpu_swarm():
 
                 pg_loss1 = -mb_adv * ratio
                 pg_loss2 = -mb_adv * torch.clamp(
-                    ratio, 1 - DEFAULT_CONFIG["clip_coef"], 1 + DEFAULT_CONFIG["clip_coef"]
+                    ratio, 1 - current_config["clip_coef"], 1 + current_config["clip_coef"]
                 )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
@@ -461,21 +481,21 @@ def train_gpu_swarm():
 
                 loss = (
                     pg_loss
-                    - DEFAULT_CONFIG["ent_coef"] * entropy
-                    + DEFAULT_CONFIG["vf_coef"] * v_loss
+                    - current_config["ent_coef"] * entropy
+                    + current_config["vf_coef"] * v_loss
                 )
 
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(
                     list(actor.parameters()) + list(critic.parameters()),
-                    DEFAULT_CONFIG["max_grad_norm"],
+                    current_config["max_grad_norm"],
                 )
                 optimizer.step()
 
         # Logging
         elapsed = time.time() - start_time
-        fps = int((update) * args.num_envs * DEFAULT_CONFIG["num_steps"] / elapsed)
+        fps = int((update) * num_envs * current_config["num_steps"] / elapsed)
         mean_reward = b_rewards.mean().item()
 
         logger.info(
@@ -483,7 +503,7 @@ def train_gpu_swarm():
         )
 
         # Rollout Summary
-        total_steps = args.num_envs * DEFAULT_CONFIG["num_steps"]
+        total_steps = num_envs * current_config["num_steps"]
         dep_pct = 100.0 * n_depositions / total_steps
         agent_pct = 100.0 * n_agent_actions / total_steps
         logger.info(
