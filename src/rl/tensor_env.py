@@ -350,3 +350,44 @@ class TensorTiO2Env:
         # Actually, substrate has energy? No, we only count bonds involving deposited atoms.
         # So empty lattice has E=0, N=0 -> Omega=0.
         self.prev_omega[env_indices] = 0.0
+    
+    def deposit(self, env_indices, species_type, coords):
+        """
+        Execute deposition for specific environments.
+        
+        Args:
+            env_indices: Tensor of environment indices to deposit in.
+            species_type: SpeciesType.TI or SpeciesType.O
+            coords: (N, 3) tensor of (x, y, z) coordinates for each env in env_indices.
+        
+        Returns:
+            rewards: Tensor of rewards for these depositions.
+        """
+        # Update Lattice
+        # coords: (N, 3) -> x, y, z
+        x = coords[:, 0]
+        y = coords[:, 1]
+        z = coords[:, 2]
+        
+        # Set species
+        # We need to use advanced indexing
+        # self.lattices[env_indices, x, y, z] = species_type.value
+        self.lattices.index_put_((env_indices, x, y, z), torch.tensor(species_type.value, device=self.device, dtype=torch.int8))
+        
+        # Calculate Rewards (Change in Grand Potential)
+        # We only need to recalculate Omega for the affected environments
+        # But _calculate_grand_potential computes for ALL envs.
+        # For efficiency, we might want to compute delta locally, but for now re-computing all is safer/easier.
+        
+        new_omega = self._calculate_grand_potential()
+        
+        # Reward = -(Omega_new - Omega_old) / kT (or scaled)
+        # We use the same scaling as CPU: -delta_omega / 5.0
+        delta_omega = new_omega - self.prev_omega
+        rewards = -delta_omega / 5.0
+        
+        # Update prev_omega
+        self.prev_omega = new_omega
+        
+        # Return rewards for the affected envs
+        return rewards[env_indices]
