@@ -209,13 +209,30 @@ def run_massive_prediction(
     # CACHING INITIALIZATION
     cached_logits = None
     dirty_indices = None
+    cached_base_rates = None
 
     for step in range(1, steps + 1):
         # 1. Calculate Rates First (Physics)
         # We do this BEFORE inference to skip inference if we choose deposition.
         B, X, Y, Z = env.lattices.shape
 
-        base_rates = env.physics.calculate_diffusion_rates(env.lattices)
+        if cached_base_rates is None:
+            base_rates = env.physics.calculate_diffusion_rates(env.lattices)
+            cached_base_rates = base_rates
+        elif dirty_indices is not None and len(dirty_indices) > 0:
+             # Partial Update of Rates
+             # We need to update rates for dirty_indices
+             # But calculate_diffusion_rates works on the whole lattice or we need a partial version
+             # For now, let's just re-calculate full rates only when dirty, but wait...
+             # calculate_diffusion_rates is fast on GPU, but doing it every step is still overhead.
+             # Let's try to optimize:
+             # Actually, calculate_diffusion_rates is O(N) and very optimized.
+             # The bottleneck might be the .sum() or the transfer.
+             base_rates = env.physics.calculate_diffusion_rates(env.lattices)
+             cached_base_rates = base_rates
+        else:
+             base_rates = cached_base_rates
+
         total_diff_rate = base_rates.sum()
 
         # Deposition rates
