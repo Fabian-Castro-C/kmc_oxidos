@@ -202,20 +202,23 @@ class TensorTiO2Env:
         # Neighbors 1-6: Real neighbors
         # Neighbors 7-12: Zeros (since we only have 6 NN)
 
-        neighbor_feats = []
+        # OPTIMIZATION: Pre-allocate output tensor to avoid holding list of tensors
+        # Shape: (Batch, N_Neighbors * 3, X, Y, Z)
+        num_neighbors = len(self.neighbor_offsets)
+        obs_neighbors = torch.empty(
+            (B, num_neighbors * 3, X, Y, Z), device=self.device, dtype=torch.float32
+        )
 
         # Helper to shift tensor
         def shift(t, dx, dy, dz):
             return torch.roll(t, shifts=(-dx, -dy, -dz), dims=(2, 3, 4))
 
-        for dx, dy, dz in self.neighbor_offsets:
+        for i, (dx, dy, dz) in enumerate(self.neighbor_offsets):
             # Get one-hot of neighbor (Vacant, Ti, O) - Ignore Substrate for obs?
             # observations.py uses [VACANT, TI, O] -> indices 0, 1, 2
             shifted = shift(one_hot, dx, dy, dz)
-            neighbor_feats.append(shifted[:, 0:3])  # Take first 3 channels
-
-        # Stack: (Batch, N_Neighbors * 3, X, Y, Z)
-        obs_neighbors = torch.cat(neighbor_feats, dim=1)
+            # Fill slice directly
+            obs_neighbors[:, i * 3 : (i + 1) * 3] = shifted[:, 0:3]
 
         # 3. Relative Heights
         # (Batch, N_Neighbors, X, Y, Z)

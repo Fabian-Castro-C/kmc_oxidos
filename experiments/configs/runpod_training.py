@@ -133,7 +133,7 @@ TRAINING_CONFIG = {
     "total_timesteps": 100_000_000,  # 100M steps for deep convergence on RTX 5090
     # Rollout collection
     "num_steps": 256,  # Short rollouts for frequent updates (Batch = 4096 * 256 = 1M)
-    "num_envs": 4096,  # Massive parallelism for RTX 5090
+    "num_envs": 2048,  # Reduced from 4096 to fit in 32GB VRAM (Batch = 2048 * 256 = 0.5M)
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
