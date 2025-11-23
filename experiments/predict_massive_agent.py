@@ -234,7 +234,7 @@ def run_massive_prediction(
             cached_base_rates = base_rates
         elif dirty_indices is not None and len(dirty_indices) > 0:
             # Partial Update of Rates (Optimized)
-            update_rates_subset(env, cached_base_rates, dirty_indices)
+            update_rates_subset(env, cached_base_rates, dirty_indices, rate_update_offsets)
             base_rates = cached_base_rates
         else:
             base_rates = cached_base_rates
@@ -303,7 +303,7 @@ def run_massive_prediction(
 
                 # Update Dirty Indices (Deposition)
                 center = torch.tensor([[dep_x, dep_y, dep_z]], device=device)
-                new_dirty = get_dirty_indices(env, center)
+                new_dirty = get_dirty_indices(env, center, dirty_offsets)
                 if dirty_indices is None:
                     dirty_indices = new_dirty
                 else:
@@ -511,7 +511,7 @@ def run_massive_prediction(
                 centers_to_update.append(dst_center)
 
             centers_tensor = torch.cat(centers_to_update, dim=0)
-            new_dirty = get_dirty_indices(env, centers_tensor)
+            new_dirty = get_dirty_indices(env, centers_tensor, dirty_offsets)
 
             if dirty_indices is None:
                 dirty_indices = new_dirty
@@ -808,19 +808,14 @@ def run_massive_prediction(
 
     logger.info(f"Results saved to {output_dir}")
 
-def get_dirty_indices(env, centers):
+def get_dirty_indices(env, centers, offsets_tensor):
     """
     Get all indices that need updating (centers + neighbors).
     centers: (K, 3) tensor of (x, y, z) coordinates.
+    offsets_tensor: Pre-allocated offsets tensor.
     """
-    offsets = torch.tensor(env.neighbor_offsets, device=env.device)  # (18, 3)
-    # Add (0,0,0) to offsets to include centers themselves
-    offsets = torch.cat(
-        [torch.zeros((1, 3), device=env.device, dtype=torch.long), offsets]
-    )
-
     # Broadcast add: (K, 1, 3) + (1, 19, 3) -> (K, 19, 3)
-    neighbors = centers.unsqueeze(1) + offsets.unsqueeze(0)
+    neighbors = centers.unsqueeze(1) + offsets_tensor.unsqueeze(0)
 
     X, Y, Z = env.lattices.shape[1:]
 
@@ -895,20 +890,14 @@ def compute_logits_subset(env, actor, indices):
 
     return logits
 
-def update_rates_subset(env, cached_rates, indices):
+def update_rates_subset(env, cached_rates, indices, offsets_tensor):
     """
     Update rates for specific indices in-place using Open Boundaries (matching tensor_rates.py).
     indices: (N, 3) tensor
+    offsets_tensor: Pre-allocated offsets tensor (6 nearest neighbors).
     """
-    # 1. Get Neighbors (6 nearest) for Coordination
-    # (0,0,1), (0,0,-1), (0,1,0), (0,-1,0), (1,0,0), (-1,0,0)
-    offsets = torch.tensor(
-        [[0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0]],
-        device=env.device,
-    )
-
     # Expand indices: (N, 1, 3) + (1, 6, 3) -> (N, 6, 3)
-    neighbor_coords = indices.unsqueeze(1) + offsets.unsqueeze(0)
+    neighbor_coords = indices.unsqueeze(1) + offsets_tensor.unsqueeze(0)
 
     # Handle Boundaries (Open - match tensor_rates.py)
     # We need to mask out-of-bounds neighbors
