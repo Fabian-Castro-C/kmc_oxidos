@@ -89,12 +89,11 @@ class TensorRateCalculator:
         base_energies[lattice_state == SpeciesType.SUBSTRATE.value] = 10.0
         base_energies[lattice_state == SpeciesType.VACANT.value] = 10.0
 
-        # Use a coordination-dependent scaling factor (Soft Barrier)
-        # Ea = E_base * (1 + 3.0 * (N / 6))
-        # We reduce the scaling factor to 0.5 to allow relaxation (avoid pillars).
-        # Ea = E_base * (1 + 0.5 * (N / 6))
-        coordination_factor = coordination_map / 6.0
-        activation_energies = base_energies * (1.0 + 1.5 * coordination_factor)
+        # Bond Counting Model (Additive)
+        # Ea = E_diff + N * E_bond_lateral
+        # We use a moderate lateral bond energy (0.3 eV) to allow nucleation without freezing.
+        E_bond_lateral = 0.3
+        activation_energies = base_energies + (coordination_map * E_bond_lateral)
 
         # 4. Calculate Rates (Arrhenius)
         # Rate = nu0 * exp(-Ea / kT)
