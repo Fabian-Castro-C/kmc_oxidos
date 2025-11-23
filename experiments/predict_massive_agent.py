@@ -127,6 +127,7 @@ def run_massive_prediction(
         num_envs=1,
         lattice_size=(lattice_size_xy, lattice_size_xy, lattice_size_z),
         device=device,
+        max_steps=steps + 10000,  # Prevent auto-reset during simulation
     )
     # Manually set fluxes (since they are not in __init__)
     # Use very low flux to allow diffusion (similar to training)
@@ -334,10 +335,30 @@ def run_massive_prediction(
             logits = torch.cat(logits_list, dim=0)
 
             # Physics masking/reweighting
+            # We need to separate Diffusion rates from Desorption rates
+            # Action 0-5: Diffusion (use base_rates)
+            # Action 6: Desorption (use much lower rate)
+            
+            # Calculate Desorption Rate
+            # E_des ~ 2.0 eV vs E_diff ~ 0.6 eV -> Delta ~ 1.4 eV
+            # Rate_des = Rate_diff * exp(-DeltaE / kT)
+            # log(Rate_des) = log(Rate_diff) - DeltaE/kT
+            # DeltaE/kT ~ 1.4 / 0.052 ~ 27.0
+            # We'll subtract a large penalty from the desorption logit
+            
             flat_base_rates = base_rates.view(-1, 1)
             flat_log_rates = torch.log(flat_base_rates + 1e-10)
+            
+            # Create a (N, 7) tensor of log rates
+            # Start with diffusion rates for all
+            all_log_rates = flat_log_rates.expand(-1, 7).clone()
+            
+            # Apply penalty to Desorption (Index 6)
+            # This effectively disables desorption unless the agent has a massive preference
+            # which it shouldn't.
+            all_log_rates[:, 6] -= 30.0 
 
-            guided_logits = logits + flat_log_rates
+            guided_logits = logits + all_log_rates
 
             # Mask Vacant AND Substrate (Fixed)
             is_mobile = (env.lattices != SpeciesType.VACANT.value) & (
