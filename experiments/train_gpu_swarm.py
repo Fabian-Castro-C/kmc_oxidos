@@ -412,6 +412,9 @@ def train_gpu_swarm():
                         "details": log_details,
                         "reward": step_rewards[0].item(),
                         "n_agents": n_agents,
+                        "env_steps": env.steps[0].item(),
+                        "env_max_steps": env.max_steps,
+                        "done": dones[0].item(),
                     }
                 )
 
