@@ -27,7 +27,7 @@ ENV_CONFIG = {
     # Thin film geometry: large substrate (x,y), sufficient height (z) for growth
     # A100-40GB: (60, 60, 120) → 432,000 sites
     # A100-80GB: (80, 80, 150) → 960,000 sites (recommended)
-    "lattice_size": (20, 20, 20),  # Standard size for GPU training
+    "lattice_size": (20, 20, 50),  # Standard size for GPU training
     # Physical parameters (MUST match between training and inference)
     # LOWERED TEMPERATURE FOR TRAINING VALIDATION:
     # At 600K, diffusion is 10^5x faster than deposition, so 2048 steps = 1 atom moving.
