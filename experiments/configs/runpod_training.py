@@ -123,6 +123,7 @@ PPO_CONFIG = {
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
     "update_epochs": 4,  # Number of epochs per PPO update (optimized for large batch size)
+    "minibatch_size": 64,  # Small minibatch to fit Swarm agents in VRAM (64 * 8000 = 512k agents)
 }
 
 # ============================================================================

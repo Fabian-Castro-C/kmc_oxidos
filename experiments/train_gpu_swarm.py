@@ -447,7 +447,9 @@ def train_gpu_swarm():
         inds = np.arange(num_envs * current_config["num_steps"])
         for _epoch in range(current_config["update_epochs"]):
             np.random.shuffle(inds)
-            minibatch_size = 256  # Adjust based on VRAM
+            # Reduced minibatch size to fit in VRAM (Swarm architecture = many agents per env)
+            # 64 envs * 8000 agents = 512,000 samples per forward pass
+            minibatch_size = current_config.get("minibatch_size", 64)
 
             for start in range(0, len(inds), minibatch_size):
                 end = start + minibatch_size
