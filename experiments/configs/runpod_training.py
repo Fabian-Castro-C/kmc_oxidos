@@ -123,7 +123,10 @@ PPO_CONFIG = {
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
     "update_epochs": 4,  # Number of epochs per PPO update (optimized for large batch size)
-    "minibatch_size": 256,  # Increased minibatch size for faster updates (128 * 8000 = 1M agents)
+    # INCREASED MINIBATCH: With 1024 envs, 256 was too small (1000+ iters).
+    # 4096 * 1000 sites = ~4M agents per batch. Fits in A100/4090.
+    # Reduces CPU overhead significantly.
+    "minibatch_size": 4096,
 }
 
 # ============================================================================
