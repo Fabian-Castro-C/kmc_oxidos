@@ -123,7 +123,7 @@ PPO_CONFIG = {
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
     "update_epochs": 4,  # Number of epochs per PPO update (optimized for large batch size)
-    "minibatch_size": 128,  # Increased minibatch size for faster updates (128 * 8000 = 1M agents)
+    "minibatch_size": 256,  # Increased minibatch size for faster updates (128 * 8000 = 1M agents)
 }
 
 # ============================================================================
