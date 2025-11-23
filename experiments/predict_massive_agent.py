@@ -214,16 +214,41 @@ def run_massive_prediction(
             is_occupied = (env.lattices != SpeciesType.VACANT.value).view(-1)
             guided_logits[~is_occupied] = -1e9
 
-            # 4. Select Action (Global Softmax over the whole lattice)
-            # Flatten to (1, XYZ * N_ACTIONS)
-            flat_env_logits = guided_logits.view(B, -1)
-
-            # Sample ONE action for the whole system
-            # NOTE: For massive systems, selecting only 1 event per step is physically correct (KMC)
-            # but might be slow to evolve. However, it's the most accurate way.
-            env_action_indices = torch.multinomial(
-                torch.softmax(flat_env_logits, dim=1), num_samples=1
-            ).squeeze(1)
+            # 4. Select Action (Hierarchical Sampling for Massive Lattices)
+            # torch.multinomial fails for > 2^24 categories.
+            # We split into blocks, sample a block, then sample within the block.
+            
+            flat_logits = guided_logits.view(-1)
+            n_total = flat_logits.numel()
+            
+            # Block size < 2^24 (16M). Using 10M.
+            block_size = 10_000_000
+            
+            # Compute unnormalized weights (safe exp)
+            max_logit = flat_logits.max()
+            weights = torch.exp(flat_logits - max_logit)
+            
+            # Split into blocks and sum
+            num_blocks = (n_total + block_size - 1) // block_size
+            block_sums = torch.zeros(num_blocks, device=device)
+            
+            for i in range(num_blocks):
+                start = i * block_size
+                end = min(start + block_size, n_total)
+                block_sums[i] = weights[start:end].sum()
+                
+            # 1. Sample Block
+            block_idx = torch.multinomial(block_sums, 1).item()
+            
+            # 2. Sample within Block
+            start = block_idx * block_size
+            end = min(start + block_size, n_total)
+            block_weights = weights[start:end]
+            
+            local_idx = torch.multinomial(block_weights, 1).item()
+            global_idx = start + local_idx
+            
+            env_action_indices = torch.tensor([global_idx], device=device)
 
             # Decode index
             N_A = N_ACTIONS
