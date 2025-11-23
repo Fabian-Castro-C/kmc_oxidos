@@ -211,6 +211,19 @@ def run_massive_prediction(
     dirty_indices = None
     cached_base_rates = None
 
+    # PRE-ALLOCATE CONSTANTS FOR OPTIMIZATION
+    # 1. Offsets for get_dirty_indices
+    dirty_offsets = torch.tensor(env.neighbor_offsets, device=device)
+    dirty_offsets = torch.cat(
+        [torch.zeros((1, 3), device=device, dtype=torch.long), dirty_offsets]
+    )
+
+    # 2. Offsets for update_rates_subset (6 nearest neighbors)
+    rate_update_offsets = torch.tensor(
+        [[0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0]],
+        device=device,
+    )
+
     for step in range(1, steps + 1):
         # 1. Calculate Rates First (Physics)
         # We do this BEFORE inference to skip inference if we choose deposition.
