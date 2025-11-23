@@ -141,8 +141,8 @@ def run_massive_prediction(
     actor = Actor(obs_dim, N_ACTIONS).to(device)
     critic = Critic(obs_dim).to(device)
 
-    actor.load_state_dict(checkpoint["actor_state_dict"])
-    critic.load_state_dict(checkpoint["critic_state_dict"])
+    actor.load_state_dict(checkpoint["actor"])
+    critic.load_state_dict(checkpoint["critic"])
     actor.eval()
     critic.eval()
 
