@@ -12,6 +12,7 @@ Usage:
 import argparse
 import csv
 import logging
+import signal
 import sys
 import time
 from pathlib import Path
@@ -227,7 +228,19 @@ def run_massive_prediction(
         device=device,
     )
 
+    # --- GRACEFUL SHUTDOWN HANDLER ---
+    interrupted = False
+    def signal_handler(sig, frame):
+        global interrupted
+        if not interrupted:
+            print("\n!!! Interrupción detectada (Ctrl+C). Terminando paso actual y guardando datos... !!!")
+            interrupted = True
+
+    signal.signal(signal.SIGINT, signal_handler)
+
     for step in range(1, steps + 1):
+        if interrupted:
+            break
         # 1. Calculate Rates First (Physics)
         # We do this BEFORE inference to skip inference if we choose deposition.
         B, X, Y, Z = env.lattices.shape
