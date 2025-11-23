@@ -14,6 +14,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+import types
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -138,6 +139,14 @@ def run_massive_prediction(
     env.flux_ti = 2.0
     env.flux_o = 4.0
 
+    # PATCH: Disable full observation generation to save memory
+    # The script manually computes observations in chunks, so we don't need
+    # env.step() to return the full (massive) observation tensor.
+    def dummy_get_observations(self):
+        return None
+
+    env._get_observations = types.MethodType(dummy_get_observations, env)
+
     # Increase temperature to boost diffusion rates
     # Training used 600K. Let's try 1000K to see if diffusion activates.
     # Rate = v0 * exp(-Ea / kT)
@@ -225,7 +234,7 @@ def run_massive_prediction(
         # This matches the logic in train_gpu_swarm.py: p_dep = torch.clamp(p_dep, min=0.05)
         p_dep = max(p_dep, 0.10)
 
-        if step % 100 == 0:
+        if step % 1000 == 0:
             logger.info(
                 f"Rates - Dep: {R_dep_total:.2e}, Diff: {total_diff_rate:.2e}, p_dep: {p_dep:.4f}, Acc: {deposition_acc:.2f}"
             )
