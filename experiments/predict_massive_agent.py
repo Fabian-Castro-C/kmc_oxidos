@@ -138,7 +138,7 @@ def run_massive_prediction(
 
     # Initialize networks
     # TensorTiO2Env produces obs of size 75 (18*3 neighbors + 18 rel_z + 2 counts + 1 abs_z)
-    obs_dim = 75 
+    obs_dim = 75
     actor = Actor(obs_dim, N_ACTIONS).to(device)
     critic = Critic(obs_dim).to(device)
 
@@ -192,7 +192,16 @@ def run_massive_prediction(
         with torch.no_grad():
             # (1*XYZ, obs_dim) -> (1*XYZ, N_ACTIONS)
             flat_obs = agent_obs.reshape(-1, obs_dim)
-            logits = actor(flat_obs)
+
+            # Batch inference to avoid OOM with massive lattices
+            # 30M sites * 256 hidden units * 4 bytes = ~30GB VRAM (Too big for single pass)
+            # We process in chunks of 500k sites (~0.5GB intermediate memory)
+            chunk_size = 500000
+            logits_list = []
+            for i in range(0, flat_obs.shape[0], chunk_size):
+                chunk = flat_obs[i : i + chunk_size]
+                logits_list.append(actor(chunk))
+            logits = torch.cat(logits_list, dim=0)
 
             # Physics masking/reweighting
             base_rates = env.physics.calculate_diffusion_rates(env.lattices)
