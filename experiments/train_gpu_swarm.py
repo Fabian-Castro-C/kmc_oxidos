@@ -225,13 +225,11 @@ def train_gpu_swarm():
         batch_values = []
         batch_log_rates = []  # For reweighting
 
-        # For detailed logging of the first environment
-        detailed_log_steps = []
-
         # Logging stats for this update
         ep_rewards = []
         n_depositions = 0
         n_agent_actions = 0
+        detailed_log_steps = []
 
         # --- Rollout Phase ---
         for step in range(current_config["num_steps"]):
@@ -320,6 +318,14 @@ def train_gpu_swarm():
             step_rewards += rewards
             n_agent_actions += (~should_deposit).sum().item()
 
+            # Log Agent Action (Env 0 only)
+            if not should_deposit[0]:
+                act_idx = agent_actions[0, 3].item()
+                act_name = ["UP", "DOWN", "LEFT", "RIGHT", "FORWARD", "BACKWARD"][act_idx]
+                detailed_log_steps.append(
+                    f"Step {step}: Agent at ({agent_actions[0,0]}, {agent_actions[0,1]}, {agent_actions[0,2]}) moved {act_name}"
+                )
+
             # Execute Deposition (Overwrite)
             if should_deposit.any():
                 dep_indices = torch.nonzero(should_deposit).squeeze(1)
@@ -365,11 +371,23 @@ def train_gpu_swarm():
                         r_ti = env.deposit(ti_idx, SpeciesType.TI, ti_coords)
                         # step_rewards[ti_idx] = r_ti  # DISABLED: User requested training only on agent actions
 
+                        # Log Deposition (Env 0 only)
+                        if 0 in ti_idx:
+                            idx_in_batch = (ti_idx == 0).nonzero(as_tuple=True)[0].item()
+                            coords = ti_coords[idx_in_batch]
+                            detailed_log_steps.append(f"Step {step}: DEPOSITION Ti at ({coords[0]}, {coords[1]}, {coords[2]})")
+
                     if (~is_ti).any():
                         o_idx = dep_indices[~is_ti]
                         o_coords = dep_coords[~is_ti]
                         r_o = env.deposit(o_idx, SpeciesType.O, o_coords)
                         # step_rewards[o_idx] = r_o  # DISABLED: User requested training only on agent actions
+
+                        # Log Deposition (Env 0 only)
+                        if 0 in o_idx:
+                            idx_in_batch = (o_idx == 0).nonzero(as_tuple=True)[0].item()
+                            coords = o_coords[idx_in_batch]
+                            detailed_log_steps.append(f"Step {step}: DEPOSITION O at ({coords[0]}, {coords[1]}, {coords[2]})")
 
             # Store data
             batch_actions.append(env_action_indices)
@@ -381,6 +399,29 @@ def train_gpu_swarm():
 
             obs = next_obs
             ep_rewards.append(step_rewards.mean().item())
+
+        # Print detailed steps for Env 0 (Sampled: First 30, Middle 30, Last 30)
+        logger.info(f"Detailed Steps (Env 0) - Total Steps: {len(detailed_log_steps)}")
+        if len(detailed_log_steps) <= 90:
+            for msg in detailed_log_steps:
+                logger.info("  " + msg)
+        else:
+            # First 30
+            for msg in detailed_log_steps[:30]:
+                logger.info("  " + msg)
+            
+            logger.info("  ... (skipping intermediate steps) ...")
+            
+            # Middle 30
+            mid = len(detailed_log_steps) // 2
+            for msg in detailed_log_steps[mid-15:mid+15]:
+                logger.info("  " + msg)
+                
+            logger.info("  ... (skipping intermediate steps) ...")
+
+            # Last 30
+            for msg in detailed_log_steps[-30:]:
+                logger.info("  " + msg)
 
         # --- Update Phase (PPO) ---
         b_lattices = torch.stack(batch_lattices)  # (T, B, X, Y, Z)
