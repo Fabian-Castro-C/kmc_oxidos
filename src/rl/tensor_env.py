@@ -379,22 +379,15 @@ class TensorTiO2Env:
 
     def reset_envs(self, env_indices):
         """Reset specific environments."""
-        self.lattices[env_indices].fill_(SpeciesType.VACANT.value)
+        # Use direct assignment for advanced indexing to ensure in-place modification
+        self.lattices[env_indices] = SpeciesType.VACANT.value
         self.lattices[env_indices, :, :, 0] = SpeciesType.SUBSTRATE.value
-        self.atom_ids[env_indices].fill_(0)
+        
+        self.atom_ids[env_indices] = 0
         self.next_atom_id[env_indices] = 1
         self.steps[env_indices] = 0
 
         # Reset Omega for these envs
-        # We need to recalculate for these specific indices
-        # But _calculate_grand_potential returns all.
-        # Efficient way: just update the slice
-        # Or simpler: just recalculate all (expensive but safe)
-        # Or better: implement _calculate_grand_potential to accept indices?
-        # For now, let's just recalculate all and slice, or assume reset state is known.
-        # Reset state (empty) has Omega = 0 (if we ignore substrate energy or it cancels out)
-        # Actually, substrate has energy? No, we only count bonds involving deposited atoms.
-        # So empty lattice has E=0, N=0 -> Omega=0.
         self.prev_omega[env_indices] = 0.0
 
     def deposit(self, env_indices, species_type, coords):
