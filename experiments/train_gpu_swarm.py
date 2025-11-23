@@ -312,7 +312,10 @@ def train_gpu_swarm():
             # Track action type for logging (0=Agent, 1=Deposition)
             # For the first env, we want to know exactly what happened
             log_action_type = "Agent Action"
-            log_details = f"Agent at ({x[0]},{y[0]},{z[0]}) -> {ActionType(a[0].item()).name}"
+            
+            # Get Agent ID for logging (Env 0)
+            agent_id = env.atom_ids[0, x[0], y[0], z[0]].item()
+            log_details = f"Agent #{agent_id} at ({x[0]},{y[0]},{z[0]}) -> {ActionType(a[0].item()).name}"
 
             # Execute Agent Step (for ALL, but we'll ignore/overwrite for depositing)
             next_obs, rewards, dones, _ = env.step(agent_actions)
@@ -361,8 +364,10 @@ def train_gpu_swarm():
                         idx = idx_in_dep.item()
                         is_ti_0 = is_ti[idx]
                         species = "Ti" if is_ti_0 else "O"
+                        # Get the ID of the newly deposited atom
+                        new_id = env.atom_ids[0, dep_x[idx], dep_y[idx], dep_z[idx]].item()
                         log_details = (
-                            f"Deposit {species} at ({dep_x[idx]},{dep_y[idx]},{dep_z[idx]})"
+                            f"Deposit {species} #{new_id} at ({dep_x[idx]},{dep_y[idx]},{dep_z[idx]})"
                         )
 
             # Store data

@@ -56,6 +56,13 @@ class TensorTiO2Env:
         # Initialize Substrate (z=0)
         self.lattices[:, :, :, 0] = SpeciesType.SUBSTRATE.value
 
+        # Atom IDs (Batch, X, Y, Z) - For tracking individual atoms in logs
+        # 0 = No ID (Vacant/Substrate), >0 = Atom ID
+        self.atom_ids = torch.zeros(
+            (num_envs, self.nx, self.ny, self.nz), dtype=torch.long, device=self.device
+        )
+        self.next_atom_id = torch.ones(num_envs, dtype=torch.long, device=self.device)
+
         # Step counters
         self.steps = torch.zeros(num_envs, dtype=torch.long, device=self.device)
 
@@ -125,6 +132,8 @@ class TensorTiO2Env:
         """Reset all environments."""
         self.lattices.fill_(SpeciesType.VACANT.value)
         self.lattices[:, :, :, 0] = SpeciesType.SUBSTRATE.value
+        self.atom_ids.fill_(0)
+        self.next_atom_id.fill_(1)
         self.steps.fill_(0)
 
         # Reset Omega
@@ -315,9 +324,28 @@ class TensorTiO2Env:
             src_val = self.lattices[mb, mx, my, mz]
             dst_val = self.lattices[mb, mtx, mty, mtz]
 
-            # Swap
-            self.lattices[mb, mx, my, mz] = dst_val
-            self.lattices[mb, mtx, mty, mtz] = src_val
+            # Only allow move if destination is VACANT (Hopping mechanism)
+            # If destination is occupied, the move is rejected (no-op)
+            is_vacant = (dst_val == SpeciesType.VACANT.value)
+            
+            if is_vacant.any():
+                # Apply filter again for valid moves
+                mb = mb[is_vacant]
+                mx, my, mz = mx[is_vacant], my[is_vacant], mz[is_vacant]
+                mtx, mty, mtz = mtx[is_vacant], mty[is_vacant], mtz[is_vacant]
+                src_val = src_val[is_vacant]
+                dst_val = dst_val[is_vacant]
+
+                # Swap (effectively moves src to dst, and puts VACANT in src)
+                self.lattices[mb, mx, my, mz] = dst_val
+                self.lattices[mb, mtx, mty, mtz] = src_val
+
+                # Move Atom IDs
+                src_id = self.atom_ids[mb, mx, my, mz]
+                dst_id = self.atom_ids[mb, mtx, mty, mtz] # Should be 0 (Vacant)
+                
+                self.atom_ids[mb, mx, my, mz] = dst_id
+                self.atom_ids[mb, mtx, mty, mtz] = src_id
 
         # Execute Desorption (Action 6)
         mask_desorb = a == 6
@@ -325,6 +353,7 @@ class TensorTiO2Env:
             self.lattices[b_idx[mask_desorb], x[mask_desorb], y[mask_desorb], z[mask_desorb]] = (
                 SpeciesType.VACANT.value
             )
+            self.atom_ids[b_idx[mask_desorb], x[mask_desorb], y[mask_desorb], z[mask_desorb]] = 0
 
         # Calculate Rewards
         current_omega = self._calculate_grand_potential()
@@ -348,6 +377,8 @@ class TensorTiO2Env:
         """Reset specific environments."""
         self.lattices[env_indices].fill_(SpeciesType.VACANT.value)
         self.lattices[env_indices, :, :, 0] = SpeciesType.SUBSTRATE.value
+        self.atom_ids[env_indices].fill_(0)
+        self.next_atom_id[env_indices] = 1
         self.steps[env_indices] = 0
 
         # Reset Omega for these envs
@@ -387,6 +418,16 @@ class TensorTiO2Env:
             (env_indices, x, y, z),
             torch.tensor(species_type.value, device=self.device, dtype=torch.int8),
         )
+
+        # Assign new Atom IDs
+        # Get current next_ids for these envs
+        current_ids = self.next_atom_id[env_indices]
+        self.atom_ids.index_put_(
+            (env_indices, x, y, z),
+            current_ids
+        )
+        # Increment counters
+        self.next_atom_id[env_indices] += 1
 
         # Calculate Rewards (Change in Grand Potential)
         # We only need to recalculate Omega for the affected environments
