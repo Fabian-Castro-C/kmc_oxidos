@@ -27,18 +27,16 @@ ENV_CONFIG = {
     # Thin film geometry: large substrate (x,y), sufficient height (z) for growth
     # A100-40GB: (60, 60, 120) → 432,000 sites
     # A100-80GB: (80, 80, 150) → 960,000 sites (recommended)
-    "lattice_size": (10, 10, 50),  # Small lattice for fast training
+    "lattice_size": (20, 20, 20),  # Standard size for GPU training
     # Physical parameters (MUST match between training and inference)
     # LOWERED TEMPERATURE FOR TRAINING VALIDATION:
     # At 600K, diffusion is 10^5x faster than deposition, so 2048 steps = 1 atom moving.
     # At 350K, diffusion is comparable to deposition, allowing film growth in 2048 steps.
     "temperature": 600.0,  # Kelvin - Restored to paper value for correct physics
-    "deposition_flux_ti": 5.0,  # ML/s - Increased flux to ensure growth
-    "deposition_flux_o": 10.0,  # ML/s - Increased flux to ensure growth
-    "validation_flux_ti": 1.0,  # ML/s
-    "validation_flux_o": 2.0,  # ML/s
+    "deposition_flux_ti": 0.5,  # ML/s - Low flux for diffusion-dominated regime
+    "deposition_flux_o": 1.0,  # ML/s - Low flux for diffusion-dominated regime
     # Episode configuration
-    "max_steps_per_episode": 3000,  # Longer episodes for larger system equilibration
+    "max_steps_per_episode": 5000,  # Longer episodes for larger system equilibration
     # Random seed for reproducibility
     "seed": 4242,
 }
@@ -73,7 +71,7 @@ FLUX_SCHEDULE_CONFIG = {
     #   ~1 deposition every 20 steps
     #
     "flux_stages": [
-        {"at_update": 0, "flux_ti": 0.05, "flux_o": 0.1},  # Reduced flux for more agent control
+        {"at_update": 0, "flux_ti": 0.5, "flux_o": 1.0},  # Low flux for ideal training
     ],
 }
 
@@ -109,7 +107,7 @@ REWARD_SHAPING_CONFIG = {
 # ============================================================================
 PPO_CONFIG = {
     # Learning rate schedule
-    "learning_rate": 1e-6,  # Fine-tuning: 1/3 of original for careful adjustments
+    "learning_rate": 3e-4,  # Standard PPO rate for fresh training
     "lr_schedule": "constant",  # Options: "constant", "linear_decay", "cosine"
     "lr_end_factor": 0.1,  # Final LR = initial_lr * lr_end_factor (if using decay)
     # Discount and advantage estimation
@@ -124,7 +122,7 @@ PPO_CONFIG = {
     "max_grad_norm": 0.5,  # Gradient clipping for stability
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
-    "update_epochs": 4,  # Number of epochs per PPO update (increased for better policy correction)
+    "update_epochs": 4,  # Number of epochs per PPO update (optimized for large batch size)
 }
 
 # ============================================================================
@@ -132,13 +130,14 @@ PPO_CONFIG = {
 # ============================================================================
 TRAINING_CONFIG = {
     # Total training budget
-    "total_timesteps": 1_000_000,  # Fine-tuning: shorter run to refine policy
+    "total_timesteps": 100_000_000,  # 100M steps for deep convergence on RTX 5090
     # Rollout collection
-    "num_steps": 2048,  # Steps per rollout (standard PPO value)
+    "num_steps": 256,  # Short rollouts for frequent updates (Batch = 4096 * 256 = 1M)
+    "num_envs": 4096,  # Massive parallelism for RTX 5090
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
-    "resume_from_checkpoint": None,  # Fine-tuning from best model (Actor Reward: 0.2558)
+    "resume_from_checkpoint": None,  # Train from scratch
     # --- END NEW ---
     # Checkpointing
     "checkpoint_frequency": 50,  # Save checkpoint every N updates

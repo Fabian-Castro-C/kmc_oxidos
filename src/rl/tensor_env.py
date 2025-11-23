@@ -80,10 +80,7 @@ class TensorTiO2Env:
     def _init_observation_kernels(self):
         """Initialize convolution kernels for observation generation."""
         # 1. Neighbor Kernels (for 1-hot neighbors)
-        # We have 6 nearest neighbors in the lattice:
-        # (x+1), (x-1), (y+1), (y-1), (z+1), (z-1)
-        # But observation space expects 12 neighbors. We fill the first 6.
-
+        # 1st Neighbors (6): (±1, 0, 0), (0, ±1, 0), (0, 0, ±1)
         self.neighbor_offsets = [
             (1, 0, 0),
             (-1, 0, 0),
@@ -92,12 +89,36 @@ class TensorTiO2Env:
             (0, 0, 1),
             (0, 0, -1),
         ]
-        # Remaining 6 are dummy (0,0,0) or handled by padding
+
+        # 2nd Neighbors (12): (±1, ±1, 0), (±1, 0, ±1), (0, ±1, ±1)
+        second_neighbors = [
+            (1, 1, 0),
+            (1, -1, 0),
+            (-1, 1, 0),
+            (-1, -1, 0),
+            (1, 0, 1),
+            (1, 0, -1),
+            (-1, 0, 1),
+            (-1, 0, -1),
+            (0, 1, 1),
+            (0, 1, -1),
+            (0, -1, 1),
+            (0, -1, -1),
+        ]
+        self.neighbor_offsets.extend(second_neighbors)
 
         # 2. Relative Height Kernels
-        # For the 6 neighbors, relative Z is: 0, 0, 0, 0, +1, -1
+        # 1st Neighbors Z: 0, 0, 0, 0, 1, -1
+        z_1st = [0, 0, 0, 0, 1, -1]
+
+        # 2nd Neighbors Z:
+        # (±1, ±1, 0) -> 0 (4 items)
+        # (±1, 0, ±1) -> ±1 (4 items: 1, -1, 1, -1)
+        # (0, ±1, ±1) -> ±1 (4 items: 1, -1, 1, -1)
+        z_2nd = [0, 0, 0, 0, 1, -1, 1, -1, 1, -1, 1, -1]
+
         self.relative_z_values = torch.tensor(
-            [0, 0, 0, 0, 1, -1] + [0] * 6, dtype=torch.float32, device=self.device
+            z_1st + z_2nd, dtype=torch.float32, device=self.device
         )
 
     def reset(self):
@@ -193,39 +214,34 @@ class TensorTiO2Env:
             shifted = shift(one_hot, dx, dy, dz)
             neighbor_feats.append(shifted[:, 0:3])  # Take first 3 channels
 
-        # Pad with zeros for neighbors 7-12
-        for _ in range(6):
-            neighbor_feats.append(torch.zeros((B, 3, X, Y, Z), device=self.device))
-
-        # Stack: (Batch, 36, X, Y, Z)
+        # Stack: (Batch, N_Neighbors * 3, X, Y, Z)
         obs_neighbors = torch.cat(neighbor_feats, dim=1)
 
-        # 3. Relative Heights (Channels 36-47)
-        # These are constant planes for a grid, except boundaries
-        # (Batch, 12, X, Y, Z)
-        obs_rel_z = torch.zeros((B, 12, X, Y, Z), device=self.device)
+        # 3. Relative Heights
+        # (Batch, N_Neighbors, X, Y, Z)
+        num_neighbors = len(self.neighbor_offsets)
+        obs_rel_z = torch.zeros((B, num_neighbors, X, Y, Z), device=self.device)
         for i, val in enumerate(self.relative_z_values):
             obs_rel_z[:, i, :, :, :] = val
 
-        # 4. Local Composition (Channels 48-49)
-        # Count Ti (idx 1) and O (idx 2) in 1st shell
-        # We can sum the neighbor features we just extracted
+        # 4. Local Composition
+        # Count Ti (idx 1) and O (idx 2) in ALL neighbors
         # Ti is channel 1 in each block of 3
         # O is channel 2 in each block of 3
 
         # Extract Ti channels: indices 1, 4, 7, ...
-        ti_indices = [i * 3 + 1 for i in range(6)]
-        o_indices = [i * 3 + 2 for i in range(6)]
+        ti_indices = [i * 3 + 1 for i in range(num_neighbors)]
+        o_indices = [i * 3 + 2 for i in range(num_neighbors)]
 
         n_ti = obs_neighbors[:, ti_indices].sum(dim=1, keepdim=True)
         n_o = obs_neighbors[:, o_indices].sum(dim=1, keepdim=True)
 
-        # 5. Absolute Z (Channel 50)
+        # 5. Absolute Z (Channel 50 -> 74)
         z_coords = torch.arange(Z, device=self.device, dtype=torch.float32)
         obs_abs_z = z_coords.view(1, 1, 1, 1, Z).expand(B, 1, X, Y, Z)
 
         # Concatenate all
-        # 36 + 12 + 2 + 1 = 51
+        # 18*3 (54) + 18 + 2 + 1 = 75
         full_obs = torch.cat([obs_neighbors, obs_rel_z, n_ti, n_o, obs_abs_z], dim=1)
 
         return full_obs

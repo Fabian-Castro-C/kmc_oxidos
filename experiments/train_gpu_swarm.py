@@ -41,14 +41,42 @@ def load_config(config_path: str) -> dict:
     spec = importlib.util.spec_from_file_location("config_module", config_path)
     config_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(config_module)
-    return config_module.CONFIG
+
+    # Merge all config sections into one flat dict
+    full_config = {}
+
+    # Add top-level variables if they exist
+    if hasattr(config_module, "ENV_CONFIG"):
+        full_config.update(config_module.ENV_CONFIG)
+    if hasattr(config_module, "TRAINING_CONFIG"):
+        full_config.update(config_module.TRAINING_CONFIG)
+    if hasattr(config_module, "PPO_CONFIG"):
+        full_config.update(config_module.PPO_CONFIG)
+    if hasattr(config_module, "COMPUTE_CONFIG"):
+        full_config.update(config_module.COMPUTE_CONFIG)
+    if hasattr(config_module, "FLUX_SCHEDULE_CONFIG"):
+        full_config.update(config_module.FLUX_SCHEDULE_CONFIG)
+
+    return full_config
 
 
 def get_flux_for_update(update_num: int, config: dict) -> tuple[float, float]:
     """
     Get deposition flux for current update.
     """
-    # Simple fixed flux for now, can be extended for schedule
+    if config.get("enable_flux_schedule", False):
+        stages = config.get("flux_stages", [])
+        # Find the latest stage that applies
+        current_stage = None
+        for stage in stages:
+            if update_num >= stage["at_update"]:
+                current_stage = stage
+            else:
+                break
+
+        if current_stage:
+            return current_stage["flux_ti"], current_stage["flux_o"]
+
     return config["deposition_flux_ti"], config["deposition_flux_o"]
 
 
@@ -74,9 +102,21 @@ DEFAULT_CONFIG = {
 def train_gpu_swarm():
     parser = argparse.ArgumentParser(description="GPU SwarmThinkers Training")
     parser.add_argument("--config", type=str, default=None, help="Path to configuration file")
-    parser.add_argument("--num_envs", type=int, default=None, help="Number of parallel environments (overrides config)")
-    parser.add_argument("--total_timesteps", type=int, default=None, help="Total training steps (overrides config)")
-    parser.add_argument("--device", type=str, default=None, help="Device (cuda/cpu) (overrides config)")
+    parser.add_argument(
+        "--num_envs",
+        type=int,
+        default=None,
+        help="Number of parallel environments (overrides config)",
+    )
+    parser.add_argument(
+        "--total_timesteps", type=int, default=None, help="Total training steps (overrides config)"
+    )
+    parser.add_argument(
+        "--num_steps", type=int, default=None, help="Steps per rollout (overrides config)"
+    )
+    parser.add_argument(
+        "--device", type=str, default=None, help="Device (cuda/cpu) (overrides config)"
+    )
     args = parser.parse_args()
 
     # 1. Start with Defaults
@@ -87,13 +127,15 @@ def train_gpu_swarm():
         logger.info(f"Loading configuration from: {args.config}")
         file_config = load_config(args.config)
         current_config.update(file_config)
-    
+
     # 3. Override with CLI args if provided
     if args.num_envs is not None:
         current_config["num_envs"] = args.num_envs
     if args.total_timesteps is not None:
         current_config["total_timesteps"] = args.total_timesteps
-    
+    if args.num_steps is not None:
+        current_config["num_steps"] = args.num_steps
+
     # Device handling
     if args.device:
         device_name = args.device
@@ -101,7 +143,7 @@ def train_gpu_swarm():
         device_name = current_config["device"]
     else:
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
-    
+
     device = torch.device(device_name)
     logger.info(f"Training on {device}")
 
@@ -112,12 +154,10 @@ def train_gpu_swarm():
 
     # 1. Initialize Environment
     logger.info(f"Initializing {num_envs} parallel environments...")
-    env = TensorTiO2Env(
-        num_envs=num_envs, lattice_size=lattice_size, device=device_name
-    )
+    env = TensorTiO2Env(num_envs=num_envs, lattice_size=lattice_size, device=device_name)
 
     # 2. Initialize Networks
-    obs_dim = 51
+    obs_dim = 75  # 18 neighbors * 3 + 18 rel_z + 2 local + 1 abs_z
     global_obs_dim = 12  # Default in Critic
 
     actor = Actor(obs_dim=obs_dim, action_dim=N_ACTIONS).to(device)
@@ -207,8 +247,8 @@ def train_gpu_swarm():
 
             # 3. Prepare Observations
             B, C, X, Y, Z = obs.shape
-            # (B, 51, X, Y, Z) -> (B, XYZ, 51)
-            agent_obs = obs.permute(0, 2, 3, 4, 1).reshape(B, -1, 51)
+            # (B, obs_dim, X, Y, Z) -> (B, XYZ, obs_dim)
+            agent_obs = obs.permute(0, 2, 3, 4, 1).reshape(B, -1, obs_dim)
 
             # Global features: Coverage + Dummy
             coverage = (
@@ -219,11 +259,11 @@ def train_gpu_swarm():
             )  # (B, 12)
 
             with torch.no_grad():
-                # Actor: (B*XYZ, 51) -> (B*XYZ, N_ACTIONS)
-                flat_obs = agent_obs.reshape(-1, 51)
+                # Actor: (B*XYZ, obs_dim) -> (B*XYZ, N_ACTIONS)
+                flat_obs = agent_obs.reshape(-1, obs_dim)
                 logits = actor(flat_obs)
 
-                # Critic: (B, 12), (B, XYZ, 51) -> (B, 1)
+                # Critic: (B, 12), (B, XYZ, obs_dim) -> (B, 1)
                 values = critic(global_features, agent_obs)
 
             # 4. Action Selection (Physics-Guided)
@@ -299,13 +339,13 @@ def train_gpu_swarm():
                     ti_idx = dep_indices[is_ti]
                     ti_coords = dep_coords[is_ti]
                     r_ti = env.deposit(ti_idx, SpeciesType.TI, ti_coords)
-                    step_rewards[ti_idx] = r_ti  # Overwrite reward
+                    # step_rewards[ti_idx] = r_ti  # DISABLED: User requested training only on agent actions
 
                 if (~is_ti).any():
                     o_idx = dep_indices[~is_ti]
                     o_coords = dep_coords[~is_ti]
                     r_o = env.deposit(o_idx, SpeciesType.O, o_coords)
-                    step_rewards[o_idx] = r_o  # Overwrite reward
+                    # step_rewards[o_idx] = r_o  # DISABLED: User requested training only on agent actions
 
                 # Check if first env was a deposition
                 if should_deposit[0]:
@@ -334,7 +374,13 @@ def train_gpu_swarm():
             ep_rewards.append(step_rewards.mean().item())
 
             # Log for first env
-            if step < 30:
+            num_steps = current_config["num_steps"]
+            should_log_step = (
+                step < 30
+                or (step >= num_steps // 2 and step < num_steps // 2 + 30)
+                or step >= num_steps - 30
+            )
+            if should_log_step:
                 # Count agents (non-vacant, non-substrate)
                 # env.lattices is (B, X, Y, Z)
                 # We only care about env 0
@@ -399,7 +445,7 @@ def train_gpu_swarm():
 
         # Optimization
         inds = np.arange(num_envs * current_config["num_steps"])
-        for epoch in range(current_config["update_epochs"]):
+        for _epoch in range(current_config["update_epochs"]):
             np.random.shuffle(inds)
             minibatch_size = 256  # Adjust based on VRAM
 
@@ -414,12 +460,12 @@ def train_gpu_swarm():
                 original_lattices = env.lattices
                 env.lattices = mb_lattices
                 env.num_envs = len(mb_inds)
-                new_obs = env._get_observations()  # (MB, 51, X, Y, Z)
+                new_obs = env._get_observations()  # (MB, obs_dim, X, Y, Z)
                 env.lattices = original_lattices
                 env.num_envs = num_envs
 
                 # Prepare inputs
-                mb_agent_obs = new_obs.permute(0, 2, 3, 4, 1).reshape(len(mb_inds), -1, 51)
+                mb_agent_obs = new_obs.permute(0, 2, 3, 4, 1).reshape(len(mb_inds), -1, obs_dim)
                 mb_coverage = (
                     (mb_lattices != SpeciesType.VACANT.value)
                     .float()
@@ -434,7 +480,7 @@ def train_gpu_swarm():
                 new_values = critic(mb_global, mb_agent_obs).squeeze(-1)
 
                 # Actor Logits
-                flat_new_obs = mb_agent_obs.reshape(-1, 51)
+                flat_new_obs = mb_agent_obs.reshape(-1, obs_dim)
                 new_logits = actor(flat_new_obs)
 
                 # Re-calculate Log Rates (Expensive? We can approximate or recompute)
@@ -510,9 +556,27 @@ def train_gpu_swarm():
             f"  Rollout summary: {n_depositions} depositions ({dep_pct:.1f}%), {n_agent_actions} agent actions ({agent_pct:.1f}%)"
         )
 
-        # Detailed Step Logging (First 30 steps of first env)
-        logger.info("--- First 30 Steps (Env 0) ---")
+        # Detailed Step Logging
+        logger.info("--- Detailed Steps (Env 0) ---")
+
+        printed_first = False
+        printed_middle = False
+        printed_last = False
+
+        num_steps = current_config["num_steps"]
+
         for log in detailed_log_steps:
+            step = log["step"]
+
+            if step < 30 and not printed_first:
+                logger.info("--- First 30 Steps ---")
+                printed_first = True
+            elif step >= num_steps // 2 and step < num_steps // 2 + 30 and not printed_middle:
+                logger.info("--- Middle 30 Steps ---")
+                printed_middle = True
+            elif step >= num_steps - 30 and not printed_last:
+                logger.info("--- Last 30 Steps ---")
+                printed_last = True
             # Format similar to train_scalable_agent.py
             # [  0] DEPOSIT Ti → Reward: +2.000, Agents: 3
             # [  0] AGENT[ 0] DIFFUSE_Y_POS → Reward: +0.000, Agents: 3

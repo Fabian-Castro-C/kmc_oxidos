@@ -43,9 +43,9 @@ CONFIG = {
     "torch_seed": 42,
     "lattice_size": (20, 20, 20),  # Slightly smaller for faster visualization
     "deposition_flux_ti": 5.0,  # Match training flux
-    "deposition_flux_o": 10.0,   # Match training flux
+    "deposition_flux_o": 10.0,  # Match training flux
     "temperature": 600.0,  # Temperature in Kelvin (should match training)
-    "max_steps": 2000,     # More steps to see growth
+    "max_steps": 2000,  # More steps to see growth
     "n_snapshots": 20,
 }
 
@@ -67,7 +67,7 @@ class PredictionResults:
 
         # Open CSV file for incremental writing
         self.csv_path = self.output_dir / "timeseries.csv"
-        self.csv_file = open(self.csv_path, 'w', newline='', buffering=1)  # Line buffered
+        self.csv_file = open(self.csv_path, "w", newline="", buffering=1)  # Line buffered
         self.csv_writer = None  # Will be initialized on first write
 
         # Keep minimal data in memory for final summary (last 100 points for plots)
@@ -104,7 +104,7 @@ class PredictionResults:
 
     def __del__(self):
         """Cleanup: ensure CSV file is closed."""
-        if hasattr(self, 'csv_file') and self.csv_file and not self.csv_file.closed:
+        if hasattr(self, "csv_file") and self.csv_file and not self.csv_file.closed:
             self.csv_file.close()
 
     def record_step(self, step: int, env: AgentBasedTiO2Env, reward: float, action_str: str):
@@ -128,6 +128,7 @@ class PredictionResults:
         if len(self.recent_steps) >= 5:
             try:
                 from src.analysis import fit_family_vicsek
+
                 steps_array = np.array(self.recent_steps, dtype=float)
                 roughnesses_array = np.array(self.recent_roughnesses)
                 system_size = float(np.sqrt(CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]))
@@ -154,6 +155,7 @@ class PredictionResults:
         if self.csv_writer is None:
             # Initialize CSV writer with header
             import csv
+
             self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=row.keys())
             self.csv_writer.writeheader()
 
@@ -196,7 +198,9 @@ class PredictionResults:
             self.snapshot_count += 1
             self.next_snapshot_step += self.snapshot_interval
 
-    def _save_snapshot_immediately(self, step: int, height_profile, roughness: float, coverage: float):
+    def _save_snapshot_immediately(
+        self, step: int, height_profile, roughness: float, coverage: float
+    ):
         """Save snapshot image and GSF file immediately."""
         # Save GSF file for Gwyddion
         self._export_to_gsf(
@@ -205,7 +209,7 @@ class PredictionResults:
             self.lattice_constant,
             step,
             roughness,
-            coverage
+            coverage,
         )
 
         # Save PNG snapshot
@@ -254,7 +258,7 @@ class PredictionResults:
                 "timeseries_csv": str(self.csv_path),
                 "snapshots_dir": str(self.snapshots_dir),
                 "gwyddion_dir": str(self.gwyddion_dir),
-            }
+            },
         }
 
         # Save JSON summary
@@ -292,7 +296,9 @@ class PredictionResults:
         plt.tight_layout()
         # Save in multiple formats
         for fmt in ["png", "svg", "pdf"]:
-            plt.savefig(self.output_dir / f"plot_01_roughness.{fmt}", dpi=150 if fmt == "png" else None)
+            plt.savefig(
+                self.output_dir / f"plot_01_roughness.{fmt}", dpi=150 if fmt == "png" else None
+            )
         plt.close()
 
         # Plot 2: Coverage and composition
@@ -316,7 +322,10 @@ class PredictionResults:
 
         plt.tight_layout()
         for fmt in ["png", "svg", "pdf"]:
-            plt.savefig(self.output_dir / f"plot_02_coverage_composition.{fmt}", dpi=150 if fmt == "png" else None)
+            plt.savefig(
+                self.output_dir / f"plot_02_coverage_composition.{fmt}",
+                dpi=150 if fmt == "png" else None,
+            )
         plt.close()
 
         # Plot 3: Rewards
@@ -341,7 +350,9 @@ class PredictionResults:
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
         for fmt in ["png", "svg", "pdf"]:
-            plt.savefig(self.output_dir / f"plot_03_rewards.{fmt}", dpi=150 if fmt == "png" else None)
+            plt.savefig(
+                self.output_dir / f"plot_03_rewards.{fmt}", dpi=150 if fmt == "png" else None
+            )
         plt.close()
 
         # Plot 4: Action distribution
@@ -366,7 +377,10 @@ class PredictionResults:
         plt.xticks(rotation=45, ha="right")
         plt.tight_layout()
         for fmt in ["png", "svg", "pdf"]:
-            plt.savefig(self.output_dir / f"plot_04_action_distribution.{fmt}", dpi=150 if fmt == "png" else None)
+            plt.savefig(
+                self.output_dir / f"plot_04_action_distribution.{fmt}",
+                dpi=150 if fmt == "png" else None,
+            )
         plt.close()
 
         # Plot 5: Final height profile
@@ -379,7 +393,9 @@ class PredictionResults:
         plt.colorbar(im, ax=ax, label="Height (layers)")
         plt.tight_layout()
         for fmt in ["png", "svg", "pdf"]:
-            plt.savefig(self.output_dir / f"plot_05_height_profile.{fmt}", dpi=150 if fmt == "png" else None)
+            plt.savefig(
+                self.output_dir / f"plot_05_height_profile.{fmt}", dpi=150 if fmt == "png" else None
+            )
         plt.close()
 
         # Plot 6: Scaling analysis (log-log)
@@ -393,7 +409,10 @@ class PredictionResults:
             ax.legend()
             plt.tight_layout()
             for fmt in ["png", "svg", "pdf"]:
-                plt.savefig(self.output_dir / f"plot_06_scaling_loglog.{fmt}", dpi=150 if fmt == "png" else None)
+                plt.savefig(
+                    self.output_dir / f"plot_06_scaling_loglog.{fmt}",
+                    dpi=150 if fmt == "png" else None,
+                )
             plt.close()
 
         # Plot 7: Scaling exponents evolution (α, β)
@@ -407,28 +426,55 @@ class PredictionResults:
                 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
 
                 # Alpha evolution
-                ax1.plot(valid_steps, valid_alpha, "ro-", linewidth=2, markersize=4, label=r"$\alpha$ (roughness)")
-                ax1.axhline(y=0.5, color='k', linestyle='--', alpha=0.3, label=r"$\alpha=0.5$ (EW)")
-                ax1.axhline(y=0.38, color='b', linestyle='--', alpha=0.3, label=r"$\alpha=0.38$ (KPZ)")
+                ax1.plot(
+                    valid_steps,
+                    valid_alpha,
+                    "ro-",
+                    linewidth=2,
+                    markersize=4,
+                    label=r"$\alpha$ (roughness)",
+                )
+                ax1.axhline(y=0.5, color="k", linestyle="--", alpha=0.3, label=r"$\alpha=0.5$ (EW)")
+                ax1.axhline(
+                    y=0.38, color="b", linestyle="--", alpha=0.3, label=r"$\alpha=0.38$ (KPZ)"
+                )
                 ax1.set_xlabel("Step", fontsize=12)
                 ax1.set_ylabel(r"$\alpha$", fontsize=14)
-                ax1.set_title(r"Roughness Exponent ($\alpha$) Evolution", fontsize=14, fontweight="bold")
+                ax1.set_title(
+                    r"Roughness Exponent ($\alpha$) Evolution", fontsize=14, fontweight="bold"
+                )
                 ax1.grid(True, alpha=0.3)
                 ax1.legend()
 
                 # Beta evolution
-                ax2.plot(valid_steps, valid_beta, "bs-", linewidth=2, markersize=4, label=r"$\beta$ (growth)")
-                ax2.axhline(y=0.25, color='k', linestyle='--', alpha=0.3, label=r"$\beta=0.25$ (EW)")
-                ax2.axhline(y=0.33, color='r', linestyle='--', alpha=0.3, label=r"$\beta=0.33$ (KPZ)")
+                ax2.plot(
+                    valid_steps,
+                    valid_beta,
+                    "bs-",
+                    linewidth=2,
+                    markersize=4,
+                    label=r"$\beta$ (growth)",
+                )
+                ax2.axhline(
+                    y=0.25, color="k", linestyle="--", alpha=0.3, label=r"$\beta=0.25$ (EW)"
+                )
+                ax2.axhline(
+                    y=0.33, color="r", linestyle="--", alpha=0.3, label=r"$\beta=0.33$ (KPZ)"
+                )
                 ax2.set_xlabel("Step", fontsize=12)
                 ax2.set_ylabel(r"$\beta$", fontsize=14)
-                ax2.set_title(r"Growth Exponent ($\beta$) Evolution", fontsize=14, fontweight="bold")
+                ax2.set_title(
+                    r"Growth Exponent ($\beta$) Evolution", fontsize=14, fontweight="bold"
+                )
                 ax2.grid(True, alpha=0.3)
                 ax2.legend()
 
                 plt.tight_layout()
                 for fmt in ["png", "svg", "pdf"]:
-                    plt.savefig(self.output_dir / f"plot_07_scaling_exponents.{fmt}", dpi=150 if fmt == "png" else None)
+                    plt.savefig(
+                        self.output_dir / f"plot_07_scaling_exponents.{fmt}",
+                        dpi=150 if fmt == "png" else None,
+                    )
                 plt.close()
 
         # Plot 8: Fractal dimension evolution
@@ -439,8 +485,8 @@ class PredictionResults:
 
             fig, ax = plt.subplots(figsize=(10, 6))
             ax.plot(valid_steps_f, valid_fractal, "go-", linewidth=2, markersize=4)
-            ax.axhline(y=2.0, color='k', linestyle='--', alpha=0.3, label="D=2.0 (flat)")
-            ax.axhline(y=2.5, color='b', linestyle='--', alpha=0.3, label="D=2.5 (typical rough)")
+            ax.axhline(y=2.0, color="k", linestyle="--", alpha=0.3, label="D=2.0 (flat)")
+            ax.axhline(y=2.5, color="b", linestyle="--", alpha=0.3, label="D=2.5 (typical rough)")
             ax.set_xlabel("Step", fontsize=12)
             ax.set_ylabel("Fractal Dimension", fontsize=12)
             ax.set_title("Fractal Dimension Evolution", fontsize=14, fontweight="bold")
@@ -448,12 +494,17 @@ class PredictionResults:
             ax.legend()
             plt.tight_layout()
             for fmt in ["png", "svg", "pdf"]:
-                plt.savefig(self.output_dir / f"plot_08_fractal_dimension.{fmt}", dpi=150 if fmt == "png" else None)
+                plt.savefig(
+                    self.output_dir / f"plot_08_fractal_dimension.{fmt}",
+                    dpi=150 if fmt == "png" else None,
+                )
             plt.close()
 
         logger.info(f"All plots generated and saved to {self.output_dir}")
 
-    def _export_to_gsf(self, height_profile, output_path, lattice_constant, step, roughness, coverage):
+    def _export_to_gsf(
+        self, height_profile, output_path, lattice_constant, step, roughness, coverage
+    ):
         """
         Export height profile to GSF (GXSM Simple Field) format for Gwyddion.
         """
@@ -467,7 +518,7 @@ class PredictionResults:
         height_angstrom = height_profile * lattice_constant
 
         # Write GSF file
-        with open(output_path, 'wb') as f:
+        with open(output_path, "wb") as f:
             # Write ASCII header
             header = f"""Gwyddion Simple Field 1.0
 XRes = {nx}
@@ -483,19 +534,19 @@ ZUnits = Angstrom
 # Step: {step}
 # Roughness: {roughness:.6f} Angstrom
 # Coverage: {coverage:.6f} ML
-# Temperature: {CONFIG['temperature']} K
+# Temperature: {CONFIG["temperature"]} K
 # Lattice constant: {lattice_constant} Angstrom
 """
-            header_bytes = header.encode('ascii')
+            header_bytes = header.encode("ascii")
             f.write(header_bytes)
 
             # Padding to 4-byte alignment
             header_length = len(header_bytes)
             padding_length = 4 - (header_length % 4)
-            f.write(b'\x00' * padding_length)
+            f.write(b"\x00" * padding_length)
 
             # Write binary data (4-byte floats, little-endian)
-            height_flat = height_angstrom.astype('<f4').tobytes()
+            height_flat = height_angstrom.astype("<f4").tobytes()
             f.write(height_flat)
 
 
@@ -552,10 +603,12 @@ def run_prediction(model_path: str):
     # Calculate Deposition Rate (R_dep)
     n_sites = CONFIG["lattice_size"][0] * CONFIG["lattice_size"][1]
     R_dep_ti = CONFIG["deposition_flux_ti"] * n_sites  # atoms/s
-    R_dep_o = CONFIG["deposition_flux_o"] * n_sites    # atoms/s
+    R_dep_o = CONFIG["deposition_flux_o"] * n_sites  # atoms/s
     R_dep_total = R_dep_ti + R_dep_o
 
-    logger.info(f"Deposition Rates: R_Ti={R_dep_ti:.2f}/s, R_O={R_dep_o:.2f}/s, R_total={R_dep_total:.2f}/s")
+    logger.info(
+        f"Deposition Rates: R_Ti={R_dep_ti:.2f}/s, R_O={R_dep_o:.2f}/s, R_total={R_dep_total:.2f}/s"
+    )
     logger.info("Using Physics-Based Competition (R_diff vs R_dep) and Action Reweighting")
 
     # Load model
@@ -586,34 +639,34 @@ def run_prediction(model_path: str):
             # 1. Calculate Total Diffusion Rate (R_diff)
             current_diffusion_rates = []
             total_diff_rate = 0.0
-            
+
             if num_agents > 0:
                 # Calculate rates for all agents
                 agent_rates = np.zeros((num_agents, N_ACTIONS), dtype=np.float32)
-                
+
                 for i, agent in enumerate(env.agents):
                     for act_idx in range(N_ACTIONS):
                         act_enum = ActionType(act_idx)
                         # if act_enum in [ActionType.ADSORB_TI, ActionType.ADSORB_O, ActionType.REACT_TIO2]:
                         #     continue
-                            
+
                         rate = rate_calculator.calculate_action_rate(agent, act_enum, env.lattice)
                         agent_rates[i, act_idx] = rate
                         total_diff_rate += rate
-                
+
                 current_diffusion_rates = agent_rates
 
             # 2. Calculate Event Probabilities
             R_total = R_dep_total + total_diff_rate
             p_deposit = R_dep_total / R_total if R_total > 0 else 1.0
-            
+
             # --- VISUALIZATION FIX: Minimum Deposition Probability ---
             # Ensure at least 5% of events are depositions to guarantee growth,
             # matching the training conditions.
             MIN_DEPOSITION_PROB = 0.05
             if num_agents > 0:
                 p_deposit = max(p_deposit, MIN_DEPOSITION_PROB)
-            
+
             # Calculate physical time step (KMC residence time)
             dt = 1.0 / R_total if R_total > 0 else 0.0
 
@@ -636,7 +689,7 @@ def run_prediction(model_path: str):
                     # Logit(a) = Policy_Logit(a) + log(Rate(a))
                     log_rates = np.log(current_diffusion_rates + 1e-10)
                     log_rates_tensor = torch.from_numpy(log_rates).to(device)
-                    
+
                     diffusion_logits = policy_logits + log_rates_tensor
 
                     # Get and apply the action mask
@@ -706,13 +759,26 @@ def main():
         help="Lattice dimensions (nx ny nz). Default from CONFIG.",
     )
     parser.add_argument(
-        "--temperature", type=float, default=None, help="Temperature in Kelvin. Default from CONFIG."
+        "--temperature",
+        type=float,
+        default=None,
+        help="Temperature in Kelvin. Default from CONFIG.",
     )
-    parser.add_argument("--steps", type=int, default=None, help="Number of simulation steps. Default from CONFIG.")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed. Default from CONFIG.")
-    parser.add_argument("--snapshots", type=int, default=None, help="Number of snapshots to save. Default from CONFIG.")
     parser.add_argument(
-        "--flux-ti", type=float, default=None, help="Ti deposition flux (ML/s). Default from CONFIG."
+        "--steps", type=int, default=None, help="Number of simulation steps. Default from CONFIG."
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Random seed. Default from CONFIG.")
+    parser.add_argument(
+        "--snapshots",
+        type=int,
+        default=None,
+        help="Number of snapshots to save. Default from CONFIG.",
+    )
+    parser.add_argument(
+        "--flux-ti",
+        type=float,
+        default=None,
+        help="Ti deposition flux (ML/s). Default from CONFIG.",
     )
     parser.add_argument(
         "--flux-o", type=float, default=None, help="O deposition flux (ML/s). Default from CONFIG."

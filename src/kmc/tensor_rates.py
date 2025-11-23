@@ -61,13 +61,15 @@ class TensorRateCalculator:
         # 1. Prepare input for convolution
         # We treat any non-vacant site as "occupied" (1.0)
         is_batch = lattice_state.ndim == 4
-        
+
         if is_batch:
             # Input: (Batch, X, Y, Z) -> (Batch, 1, X, Y, Z)
             occupancy = (lattice_state != SpeciesType.VACANT.value).float().unsqueeze(1)
         else:
             # Input: (X, Y, Z) -> (1, 1, X, Y, Z)
-            occupancy = (lattice_state != SpeciesType.VACANT.value).float().unsqueeze(0).unsqueeze(0)
+            occupancy = (
+                (lattice_state != SpeciesType.VACANT.value).float().unsqueeze(0).unsqueeze(0)
+            )
 
         # 2. Convolve to get coordination number for every site
         # Padding=1 ensures we handle boundaries (requires careful PBC handling later)
@@ -75,10 +77,7 @@ class TensorRateCalculator:
         coordination_map = F.conv3d(occupancy, self.kernel_coordination, padding=1)
 
         # Remove channel dim
-        if is_batch:
-            coordination_map = coordination_map.squeeze(1)
-        else:
-            coordination_map = coordination_map.squeeze()
+        coordination_map = coordination_map.squeeze(1) if is_batch else coordination_map.squeeze()
 
         # 3. Calculate Activation Energy for every site
         # Ea = E_base + (Coordination * |E_bond|)
