@@ -132,6 +132,9 @@ def run_massive_prediction(
     env.flux_ti = 5.0
     env.flux_o = 10.0
 
+    # Debug logging for rates
+    logger.info(f"Flux Ti: {env.flux_ti}, Flux O: {env.flux_o}")
+
     # --- Load Agent ---
     logger.info(f"Loading model from {model_path}...")
     checkpoint = torch.load(model_path, map_location=device)
@@ -179,152 +182,11 @@ def run_massive_prediction(
     # np.save(snapshots_dir / "lattice_000000.npy", env.lattices.cpu().numpy())
 
     for step in range(1, steps + 1):
-        # 1. Get Observations & Inference (Chunked to avoid OOM)
-        # We process the lattice in X-slices to keep memory usage low.
-        logits_list = []
-        
-        # Chunk size for X dimension (e.g. 50 slices of 1000x30 = 1.5M sites)
-        x_chunk_size = 50 
-        
+        # 1. Calculate Rates First (Physics)
+        # We do this BEFORE inference to skip inference if we choose deposition.
         B, X, Y, Z = env.lattices.shape
-        num_neighbors = len(env.neighbor_offsets)
         
-        # Pre-compute constant tensors for chunks
-        z_coords = torch.arange(Z, device=device, dtype=torch.float32)
-        # (1, 1, 1, 1, Z) -> (B, 1, chunk, Y, Z)
-        obs_abs_z_template = z_coords.view(1, 1, 1, 1, Z).expand(B, 1, x_chunk_size, Y, Z)
-        
-        obs_rel_z_template = torch.zeros((B, num_neighbors, x_chunk_size, Y, Z), device=device)
-        for i, val in enumerate(env.relative_z_values):
-            obs_rel_z_template[:, i, :, :, :] = val
-
-        for x_start in range(0, X, x_chunk_size):
-            x_end = min(x_start + x_chunk_size, X)
-            current_chunk_width = x_end - x_start
-            
-            # Adjust constant tensors if last chunk is smaller
-            if current_chunk_width != x_chunk_size:
-                this_obs_abs_z = obs_abs_z_template[:, :, :current_chunk_width, :, :]
-                this_obs_rel_z = obs_rel_z_template[:, :, :current_chunk_width, :, :]
-            else:
-                this_obs_abs_z = obs_abs_z_template
-                this_obs_rel_z = obs_rel_z_template
-
-            # Indices with padding (wrap-around)
-            indices = torch.arange(x_start - 1, x_end + 1, device=device) % X
-            
-            # Extract lattice slice (B, X_pad, Y, Z)
-            lattice_slice = env.lattices[:, indices, :, :]
-            
-            # One-hot (B, 4, X_pad, Y, Z)
-            one_hot = torch.zeros((B, 4, lattice_slice.shape[1], Y, Z), device=device, dtype=torch.float32)
-            one_hot.scatter_(1, lattice_slice.unsqueeze(1).long(), 1.0)
-            
-            # Construct Neighbor Features
-            obs_neighbors = torch.empty((B, num_neighbors * 3, current_chunk_width, Y, Z), device=device, dtype=torch.float32)
-            
-            for i, (dx, dy, dz) in enumerate(env.neighbor_offsets):
-                # Handle X shift via slicing the padded one_hot
-                # Center is indices 1 to 1+width
-                if dx == 1:
-                    sliced = one_hot[:, :, 2 : 2 + current_chunk_width, :, :]
-                elif dx == -1:
-                    sliced = one_hot[:, :, 0 : current_chunk_width, :, :]
-                else:
-                    sliced = one_hot[:, :, 1 : 1 + current_chunk_width, :, :]
-                
-                # Handle Y/Z shift via roll (since we have full Y/Z)
-                if dy != 0 or dz != 0:
-                    sliced = torch.roll(sliced, shifts=(-dy, -dz), dims=(3, 4))
-                
-                obs_neighbors[:, i * 3 : (i + 1) * 3] = sliced[:, 0:3]
-
-            # Local Composition
-            ti_indices = [i * 3 + 1 for i in range(num_neighbors)]
-            o_indices = [i * 3 + 2 for i in range(num_neighbors)]
-            n_ti = obs_neighbors[:, ti_indices].sum(dim=1, keepdim=True)
-            n_o = obs_neighbors[:, o_indices].sum(dim=1, keepdim=True)
-            
-            # Concat
-            full_obs_chunk = torch.cat([obs_neighbors, this_obs_rel_z, n_ti, n_o, this_obs_abs_z], dim=1)
-            
-            # Inference
-            flat_obs_chunk = full_obs_chunk.permute(0, 2, 3, 4, 1).reshape(-1, obs_dim)
-            
-            with torch.no_grad():
-                chunk_logits = actor(flat_obs_chunk)
-                logits_list.append(chunk_logits)
-            
-            # Free memory
-            del full_obs_chunk, flat_obs_chunk, obs_neighbors, one_hot, lattice_slice
-        
-        logits = torch.cat(logits_list, dim=0)
-
-        # Physics masking/reweighting
         base_rates = env.physics.calculate_diffusion_rates(env.lattices)
-        flat_base_rates = base_rates.view(-1, 1)
-        flat_log_rates = torch.log(flat_base_rates + 1e-10)
-
-        guided_logits = logits + flat_log_rates
-
-        # Mask Vacant
-        is_occupied = (env.lattices != SpeciesType.VACANT.value).view(-1)
-        guided_logits[~is_occupied] = -1e9
-
-        # 4. Select Action (Hierarchical Sampling for Massive Lattices)
-        # torch.multinomial fails for > 2^24 categories.
-        # We split into blocks, sample a block, then sample within the block.
-        
-        flat_logits = guided_logits.view(-1)
-        n_total = flat_logits.numel()
-        
-        # Block size < 2^24 (16M). Using 10M.
-        block_size = 10_000_000
-        
-        # Compute unnormalized weights (safe exp)
-        max_logit = flat_logits.max()
-        weights = torch.exp(flat_logits - max_logit)
-        
-        # Split into blocks and sum
-        num_blocks = (n_total + block_size - 1) // block_size
-        block_sums = torch.zeros(num_blocks, device=device)
-        
-        for i in range(num_blocks):
-            start = i * block_size
-            end = min(start + block_size, n_total)
-            block_sums[i] = weights[start:end].sum()
-            
-        # 1. Sample Block
-        block_idx = torch.multinomial(block_sums, 1).item()
-        
-        # 2. Sample within Block
-        start = block_idx * block_size
-        end = min(start + block_size, n_total)
-        block_weights = weights[start:end]
-        
-        local_idx = torch.multinomial(block_weights, 1).item()
-        global_idx = start + local_idx
-        
-        env_action_indices = torch.tensor([global_idx], device=device)
-
-        # Decode index
-        N_A = N_ACTIONS
-        temp = env_action_indices.clone()
-        a = temp % N_A
-        temp //= N_A
-        z = temp % Z
-        temp //= Z
-        y = temp % Y
-        x = temp // Y
-
-        agent_actions = torch.stack([x, y, z, a], dim=1)
-
-        # 5. Execute Step
-        # We need to handle deposition vs diffusion competition manually here
-        # or rely on the env. But TensorTiO2Env.step() assumes we pass agent actions.
-        # We also need to check if a deposition should happen instead.
-
-        # Calculate total rates for competition
         total_diff_rate = base_rates.sum()
 
         # Deposition rates
@@ -336,11 +198,13 @@ def run_massive_prediction(
         R_total = R_dep_total + total_diff_rate
 
         # KMC Selection: Deposition vs Diffusion
-        # We roll a die: p_dep = R_dep / R_total
         p_dep = R_dep_total / (R_total + 1e-10)
 
+        if step % 100 == 0:
+             logger.info(f"Rates - Dep: {R_dep_total:.2e}, Diff: {total_diff_rate:.2e}, p_dep: {p_dep:.4f}")
+
         if torch.rand(1, device=device) < p_dep:
-            # Deposition Event
+            # --- DEPOSITION EVENT ---
             is_ti = torch.rand(1, device=device) < (R_dep_ti / R_dep_total)
 
             # Pick random column
@@ -365,15 +229,122 @@ def run_massive_prediction(
                     action_counts["DEPOSIT_TI"] += 1
                 else:
                     action_counts["DEPOSIT_O"] += 1
-                # logger.info(f"Step {step}: Deposited {species.name} at ({dep_x.item()}, {dep_y.item()}, {dep_z.item()})")
         else:
-            # Diffusion Event (Agent Action)
-            # We already selected the agent action above
+            # --- DIFFUSION EVENT (Agent Action) ---
+            # Only NOW do we run the expensive inference
+            
+            # 1. Get Observations & Inference (Chunked to avoid OOM)
+            logits_list = []
+            x_chunk_size = 50 
+            num_neighbors = len(env.neighbor_offsets)
+            
+            # Pre-compute constant tensors for chunks
+            z_coords = torch.arange(Z, device=device, dtype=torch.float32)
+            obs_abs_z_template = z_coords.view(1, 1, 1, 1, Z).expand(B, 1, x_chunk_size, Y, Z)
+            
+            obs_rel_z_template = torch.zeros((B, num_neighbors, x_chunk_size, Y, Z), device=device)
+            for i, val in enumerate(env.relative_z_values):
+                obs_rel_z_template[:, i, :, :, :] = val
+
+            for x_start in range(0, X, x_chunk_size):
+                x_end = min(x_start + x_chunk_size, X)
+                current_chunk_width = x_end - x_start
+                
+                if current_chunk_width != x_chunk_size:
+                    this_obs_abs_z = obs_abs_z_template[:, :, :current_chunk_width, :, :]
+                    this_obs_rel_z = obs_rel_z_template[:, :, :current_chunk_width, :, :]
+                else:
+                    this_obs_abs_z = obs_abs_z_template
+                    this_obs_rel_z = obs_rel_z_template
+
+                indices = torch.arange(x_start - 1, x_end + 1, device=device) % X
+                lattice_slice = env.lattices[:, indices, :, :]
+                
+                one_hot = torch.zeros((B, 4, lattice_slice.shape[1], Y, Z), device=device, dtype=torch.float32)
+                one_hot.scatter_(1, lattice_slice.unsqueeze(1).long(), 1.0)
+                
+                obs_neighbors = torch.empty((B, num_neighbors * 3, current_chunk_width, Y, Z), device=device, dtype=torch.float32)
+                
+                for i, (dx, dy, dz) in enumerate(env.neighbor_offsets):
+                    if dx == 1:
+                        sliced = one_hot[:, :, 2 : 2 + current_chunk_width, :, :]
+                    elif dx == -1:
+                        sliced = one_hot[:, :, 0 : current_chunk_width, :, :]
+                    else:
+                        sliced = one_hot[:, :, 1 : 1 + current_chunk_width, :, :]
+                    
+                    if dy != 0 or dz != 0:
+                        sliced = torch.roll(sliced, shifts=(-dy, -dz), dims=(3, 4))
+                    
+                    obs_neighbors[:, i * 3 : (i + 1) * 3] = sliced[:, 0:3]
+
+                ti_indices = [i * 3 + 1 for i in range(num_neighbors)]
+                o_indices = [i * 3 + 2 for i in range(num_neighbors)]
+                n_ti = obs_neighbors[:, ti_indices].sum(dim=1, keepdim=True)
+                n_o = obs_neighbors[:, o_indices].sum(dim=1, keepdim=True)
+                
+                full_obs_chunk = torch.cat([obs_neighbors, this_obs_rel_z, n_ti, n_o, this_obs_abs_z], dim=1)
+                flat_obs_chunk = full_obs_chunk.permute(0, 2, 3, 4, 1).reshape(-1, obs_dim)
+                
+                with torch.no_grad():
+                    chunk_logits = actor(flat_obs_chunk)
+                    logits_list.append(chunk_logits)
+                
+                del full_obs_chunk, flat_obs_chunk, obs_neighbors, one_hot, lattice_slice
+            
+            logits = torch.cat(logits_list, dim=0)
+
+            # Physics masking/reweighting
+            flat_base_rates = base_rates.view(-1, 1)
+            flat_log_rates = torch.log(flat_base_rates + 1e-10)
+
+            guided_logits = logits + flat_log_rates
+
+            # Mask Vacant
+            is_occupied = (env.lattices != SpeciesType.VACANT.value).view(-1)
+            guided_logits[~is_occupied] = -1e9
+
+            # Hierarchical Sampling
+            flat_logits = guided_logits.view(-1)
+            n_total = flat_logits.numel()
+            block_size = 10_000_000
+            max_logit = flat_logits.max()
+            weights = torch.exp(flat_logits - max_logit)
+            
+            num_blocks = (n_total + block_size - 1) // block_size
+            block_sums = torch.zeros(num_blocks, device=device)
+            
+            for i in range(num_blocks):
+                start = i * block_size
+                end = min(start + block_size, n_total)
+                block_sums[i] = weights[start:end].sum()
+                
+            block_idx = torch.multinomial(block_sums, 1).item()
+            
+            start = block_idx * block_size
+            end = min(start + block_size, n_total)
+            block_weights = weights[start:end]
+            
+            local_idx = torch.multinomial(block_weights, 1).item()
+            global_idx = start + local_idx
+            
+            env_action_indices = torch.tensor([global_idx], device=device)
+
+            # Decode index
+            N_A = N_ACTIONS
+            temp = env_action_indices.clone()
+            a = temp % N_A
+            temp //= N_A
+            z = temp % Z
+            temp //= Z
+            y = temp % Y
+            x = temp // Y
+
+            agent_actions = torch.stack([x, y, z, a], dim=1)
+            
             env.step(agent_actions)
             total_moves += 1
 
-            # Track action type
-            # agent_actions: [x, y, z, a]
             act_type = agent_actions[0, 3].item()
             if act_type == 6:  # DESORB
                 action_counts["DESORB"] += 1
