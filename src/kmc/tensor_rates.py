@@ -92,7 +92,7 @@ class TensorRateCalculator:
         # Bond Counting Model (Additive)
         # Ea = E_diff + N * E_bond_lateral
         # We use a moderate lateral bond energy (0.3 eV) to allow nucleation without freezing.
-        E_bond_lateral = 0.3
+        E_bond_lateral = 0.05
         activation_energies = base_energies + (coordination_map * E_bond_lateral)
 
         # 4. Calculate Rates (Arrhenius)
