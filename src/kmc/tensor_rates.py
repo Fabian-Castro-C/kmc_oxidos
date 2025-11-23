@@ -80,10 +80,11 @@ class TensorRateCalculator:
         coordination_map = coordination_map.squeeze(1) if is_batch else coordination_map.squeeze()
 
         # 3. Calculate Activation Energy for every site
-        # Ea = E_base + (Coordination * |E_bond|)
-        # Note: E_bond is negative (-4.5 eV), so we subtract it to increase the barrier.
-        # Breaking bonds requires energy, so more neighbors = higher barrier.
-        activation_energies = self.E_diff_base - (coordination_map * self.E_bond)
+        # Use a coordination-dependent scaling factor (Soft Barrier)
+        # This matches the logic that allows diffusion at 600K
+        # Ea = E_base * (1 + 0.5 * (N / 6))
+        coordination_factor = coordination_map / 6.0
+        activation_energies = self.E_diff_base * (1.0 + 0.5 * coordination_factor)
 
         # 4. Calculate Rates (Arrhenius)
         # Rate = nu0 * exp(-Ea / kT)
