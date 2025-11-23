@@ -38,11 +38,11 @@ class TensorRateCalculator:
         for idx in neighbors:
             self.kernel_coordination[0, 0, idx[0], idx[1], idx[2]] = 1.0
 
-        # Kernel 2: Barrier calculation (Exclude Z-1, because substrate bond is in E_diff_base)
+        # Kernel 2: Barrier calculation (Include Z-1 to match CPU logic)
         self.kernel_barrier = torch.zeros((1, 1, 3, 3, 3), device=device)
         barrier_neighbors = [
             (1, 1, 2),  # Z+1 (Buried -> High barrier)
-            # (1, 1, 0),  # Z-1 (Substrate -> Included in base)
+            (1, 1, 0),  # Z-1 (Substrate/Support -> Increases barrier)
             (1, 2, 1),  # Y+1
             (1, 0, 1),  # Y-1
             (2, 1, 1),  # X+1
