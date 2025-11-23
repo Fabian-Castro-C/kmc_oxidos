@@ -236,6 +236,77 @@ def run_massive_prediction(
         device=device,
     )
 
+    # --- Helper for Logging ---
+    def log_metrics(current_step):
+        # Calculate Metrics
+        # Height Profile
+        # (1, X, Y, Z) -> (X, Y)
+        is_occupied = env.lattices[0] != SpeciesType.VACANT.value  # (X, Y, Z)
+
+        # Create Z indices tensor
+        z_indices = torch.arange(Z, device=device).view(1, 1, Z).expand(X, Y, Z)
+
+        # Mask unoccupied
+        occupied_z = torch.where(is_occupied, z_indices, torch.zeros_like(z_indices))
+
+        # Max Z per column
+        height_map = occupied_z.max(dim=2).values.float()  # (X, Y)
+
+        # Roughness (RMS)
+        mean_h = height_map.mean()
+        sq_diff = (height_map - mean_h) ** 2
+        rms = torch.sqrt(sq_diff.mean()).item()
+
+        # Coverage (Total atoms / Surface Area)
+        n_atoms = is_occupied.sum().item() - (X * Y)  # Subtract substrate
+        coverage = n_atoms / (X * Y)
+
+        # Composition
+        n_ti = (env.lattices == SpeciesType.TI.value).sum().item()
+        n_o = (env.lattices == SpeciesType.O.value).sum().item()
+
+        # Fractal Dimension (CPU)
+        h_np = height_map.cpu().numpy()
+        try:
+            fractal_dim = calculate_fractal_dimension(h_np)
+        except Exception:
+            fractal_dim = np.nan
+
+        # Scaling Exponents (Alpha, Beta)
+        # Update rolling window
+        recent_steps.append(current_step)
+        recent_roughnesses.append(rms)
+        if len(recent_steps) > max_recent:
+            recent_steps.pop(0)
+            recent_roughnesses.pop(0)
+
+        alpha, beta = np.nan, np.nan
+        if len(recent_steps) >= 10:
+            try:
+                steps_array = np.array(recent_steps, dtype=float)
+                roughnesses_array = np.array(recent_roughnesses)
+                system_size = float(np.sqrt(lattice_size_xy * lattice_size_xy))
+                scaling = fit_family_vicsek(steps_array, roughnesses_array, system_size)
+                alpha = float(scaling["alpha"])
+                beta = float(scaling["beta"])
+            except Exception:
+                pass
+
+        # Store
+        step_list.append(current_step)
+        roughness_list.append(rms)
+        coverage_list.append(coverage)
+        n_ti_list.append(n_ti)
+        n_o_list.append(n_o)
+        fractal_dim_list.append(fractal_dim)
+        alpha_list.append(alpha)
+        beta_list.append(beta)
+
+        logger.info(
+            f"Step {current_step}/{steps} | Dep: {total_depositions}, Mov: {total_moves} | Rq: {rms:.4f}, Cov: {coverage:.4f}, Df: {fractal_dim:.3f}, a: {alpha:.2f}, b: {beta:.2f}"
+        )
+        return h_np, rms, coverage
+
     # --- GRACEFUL SHUTDOWN HANDLER ---
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -274,10 +345,10 @@ def run_massive_prediction(
         p_dep = R_dep_total / (R_total + 1e-10)
 
         # --- VISUALIZATION FIX: Minimum Deposition Probability ---
-        # Ensure at least 10% of events are depositions to guarantee growth visualization
-        # Otherwise we just watch diffusion for millions of steps
-        # This matches the logic in train_gpu_swarm.py: p_dep = torch.clamp(p_dep, min=0.05)
-        p_dep = max(p_dep, 0.10)
+        # REMOVED: This was causing "Hit and Stick" growth (random noise) by forcing too much deposition.
+        # We let the physics dictate the ratio (typically p_dep ~ 0.005 to 0.01).
+        # This requires more steps to reach high coverage, but produces real islands.
+        # p_dep = max(p_dep, 0.10)
 
         if step % 10000 == 0:
             logger.info(
@@ -332,104 +403,112 @@ def run_massive_prediction(
 
             # 1. Update Cache
             if cached_logits is None:
-                # First run: Full Inference (Chunked)
-                logits_list = []
-                x_chunk_size = 50
-                num_neighbors = len(env.neighbor_offsets)
+                if actor is not None:
+                    # First run: Full Inference (Chunked)
+                    logits_list = []
+                    x_chunk_size = 50
+                    num_neighbors = len(env.neighbor_offsets)
 
-                # Pre-compute constant tensors for chunks
-                z_coords = torch.arange(Z, device=device, dtype=torch.float32)
-                obs_abs_z_template = z_coords.view(1, 1, 1, 1, Z).expand(
-                    B, 1, x_chunk_size, Y, Z
-                )
-
-                obs_rel_z_template = torch.zeros(
-                    (B, num_neighbors, x_chunk_size, Y, Z), device=device
-                )
-                for i, val in enumerate(env.relative_z_values):
-                    obs_rel_z_template[:, i, :, :, :] = val
-
-                for x_start in range(0, X, x_chunk_size):
-                    x_end = min(x_start + x_chunk_size, X)
-                    current_chunk_width = x_end - x_start
-
-                    if current_chunk_width != x_chunk_size:
-                        this_obs_abs_z = obs_abs_z_template[
-                            :, :, :current_chunk_width, :, :
-                        ]
-                        this_obs_rel_z = obs_rel_z_template[
-                            :, :, :current_chunk_width, :, :
-                        ]
-                    else:
-                        this_obs_abs_z = obs_abs_z_template
-                        this_obs_rel_z = obs_rel_z_template
-
-                    indices = torch.arange(x_start - 1, x_end + 1, device=device) % X
-                    lattice_slice = env.lattices[:, indices, :, :]
-
-                    one_hot = torch.zeros(
-                        (B, 4, lattice_slice.shape[1], Y, Z),
-                        device=device,
-                        dtype=torch.float32,
-                    )
-                    one_hot.scatter_(1, lattice_slice.unsqueeze(1).long(), 1.0)
-
-                    obs_neighbors = torch.empty(
-                        (B, num_neighbors * 3, current_chunk_width, Y, Z),
-                        device=device,
-                        dtype=torch.float32,
+                    # Pre-compute constant tensors for chunks
+                    z_coords = torch.arange(Z, device=device, dtype=torch.float32)
+                    obs_abs_z_template = z_coords.view(1, 1, 1, 1, Z).expand(
+                        B, 1, x_chunk_size, Y, Z
                     )
 
-                    for i, (dx, dy, dz) in enumerate(env.neighbor_offsets):
-                        if dx == 1:
-                            sliced = one_hot[:, :, 2 : 2 + current_chunk_width, :, :]
-                        elif dx == -1:
-                            sliced = one_hot[:, :, 0:current_chunk_width, :, :]
+                    obs_rel_z_template = torch.zeros(
+                        (B, num_neighbors, x_chunk_size, Y, Z), device=device
+                    )
+                    for i, val in enumerate(env.relative_z_values):
+                        obs_rel_z_template[:, i, :, :, :] = val
+
+                    for x_start in range(0, X, x_chunk_size):
+                        x_end = min(x_start + x_chunk_size, X)
+                        current_chunk_width = x_end - x_start
+
+                        if current_chunk_width != x_chunk_size:
+                            this_obs_abs_z = obs_abs_z_template[
+                                :, :, :current_chunk_width, :, :
+                            ]
+                            this_obs_rel_z = obs_rel_z_template[
+                                :, :, :current_chunk_width, :, :
+                            ]
                         else:
-                            sliced = one_hot[:, :, 1 : 1 + current_chunk_width, :, :]
+                            this_obs_abs_z = obs_abs_z_template
+                            this_obs_rel_z = obs_rel_z_template
 
-                        if dy != 0 or dz != 0:
-                            sliced = torch.roll(sliced, shifts=(-dy, -dz), dims=(3, 4))
+                        indices = torch.arange(x_start - 1, x_end + 1, device=device) % X
+                        lattice_slice = env.lattices[:, indices, :, :]
 
-                        obs_neighbors[:, i * 3 : (i + 1) * 3] = sliced[:, 0:3]
+                        one_hot = torch.zeros(
+                            (B, 4, lattice_slice.shape[1], Y, Z),
+                            device=device,
+                            dtype=torch.float32,
+                        )
+                        one_hot.scatter_(1, lattice_slice.unsqueeze(1).long(), 1.0)
 
-                    ti_indices = [i * 3 + 1 for i in range(num_neighbors)]
-                    o_indices = [i * 3 + 2 for i in range(num_neighbors)]
-                    n_ti = obs_neighbors[:, ti_indices].sum(dim=1, keepdim=True)
-                    n_o = obs_neighbors[:, o_indices].sum(dim=1, keepdim=True)
+                        obs_neighbors = torch.empty(
+                            (B, num_neighbors * 3, current_chunk_width, Y, Z),
+                            device=device,
+                            dtype=torch.float32,
+                        )
 
-                    full_obs_chunk = torch.cat(
-                        [obs_neighbors, this_obs_rel_z, n_ti, n_o, this_obs_abs_z],
-                        dim=1,
-                    )
-                    flat_obs_chunk = full_obs_chunk.permute(0, 2, 3, 4, 1).reshape(
-                        -1, obs_dim
-                    )
+                        for i, (dx, dy, dz) in enumerate(env.neighbor_offsets):
+                            if dx == 1:
+                                sliced = one_hot[:, :, 2 : 2 + current_chunk_width, :, :]
+                            elif dx == -1:
+                                sliced = one_hot[:, :, 0:current_chunk_width, :, :]
+                            else:
+                                sliced = one_hot[:, :, 1 : 1 + current_chunk_width, :, :]
 
-                    with torch.no_grad():
-                        chunk_logits = actor(flat_obs_chunk)
-                        logits_list.append(chunk_logits)
+                            if dy != 0 or dz != 0:
+                                sliced = torch.roll(sliced, shifts=(-dy, -dz), dims=(3, 4))
 
-                    del (
-                        full_obs_chunk,
-                        flat_obs_chunk,
-                        obs_neighbors,
-                        one_hot,
-                        lattice_slice,
-                    )
+                            obs_neighbors[:, i * 3 : (i + 1) * 3] = sliced[:, 0:3]
 
-                logits = torch.cat(logits_list, dim=0)
-                cached_logits = logits.view(X, Y, Z, 7)
+                        ti_indices = [i * 3 + 1 for i in range(num_neighbors)]
+                        o_indices = [i * 3 + 2 for i in range(num_neighbors)]
+                        n_ti = obs_neighbors[:, ti_indices].sum(dim=1, keepdim=True)
+                        n_o = obs_neighbors[:, o_indices].sum(dim=1, keepdim=True)
+
+                        full_obs_chunk = torch.cat(
+                            [obs_neighbors, this_obs_rel_z, n_ti, n_o, this_obs_abs_z],
+                            dim=1,
+                        )
+                        flat_obs_chunk = full_obs_chunk.permute(0, 2, 3, 4, 1).reshape(
+                            -1, obs_dim
+                        )
+
+                        with torch.no_grad():
+                            chunk_logits = actor(flat_obs_chunk)
+                            logits_list.append(chunk_logits)
+
+                        del (
+                            full_obs_chunk,
+                            flat_obs_chunk,
+                            obs_neighbors,
+                            one_hot,
+                            lattice_slice,
+                        )
+
+                    logits = torch.cat(logits_list, dim=0)
+                    cached_logits = logits.view(X, Y, Z, 7)
+                else:
+                    # No Agent: Logits are zero
+                    cached_logits = torch.zeros((X, Y, Z, 7), device=device)
+
             elif dirty_indices is not None and len(dirty_indices) > 0:
-                # Partial Update
-                new_logits = compute_logits_subset(env, actor, dirty_indices)
-                # Update cache
-                cached_logits[
-                    dirty_indices[:, 0], dirty_indices[:, 1], dirty_indices[:, 2]
-                ] = new_logits
-                dirty_indices = None  # Reset
-
-            # Use cached logits
+                if actor is not None:
+                    # Partial Update
+                    new_logits = compute_logits_subset(env, actor, dirty_indices)
+                    # Update cache
+                    cached_logits[
+                        dirty_indices[:, 0], dirty_indices[:, 1], dirty_indices[:, 2]
+                    ] = new_logits
+                else:
+                    # No Agent: Logits remain zero
+                    pass
+                
+                dirty_indices = None  # Reset            # Use cached logits
             logits = cached_logits.view(-1, 7)
 
             # Physics masking/reweighting
@@ -539,109 +618,63 @@ def run_massive_prediction(
             # logger.info(f"Step {step}: Agent moved")
 
         # 6. Snapshot & Metrics
-        if step % snapshot_interval == 0:
-            # Calculate Metrics
-            # Height Profile
-            # (1, X, Y, Z) -> (X, Y)
-            is_occupied = env.lattices[0] != SpeciesType.VACANT.value  # (X, Y, Z)
+        # Log every 100 steps OR on snapshot OR on interrupt/finish
+        should_log = (step % 100 == 0) or (step % snapshot_interval == 0) or (step == steps)
+        
+        if should_log:
+            h_np, rms, coverage = log_metrics(step)
 
-            # Create Z indices tensor
-            z_indices = torch.arange(Z, device=device).view(1, 1, Z).expand(X, Y, Z)
+            # Save Snapshot (Heavy I/O) only on interval
+            if step % snapshot_interval == 0:
+                # Save compressed numpy array
+                save_path = snapshots_dir / f"lattice_{step:06d}.npy"
+                np.save(save_path, env.lattices.cpu().numpy())
 
-            # Mask unoccupied
-            occupied_z = torch.where(is_occupied, z_indices, torch.zeros_like(z_indices))
+                # Save GSF for Gwyddion
+                gsf_path = gwyddion_dir / f"snapshot_{step:06d}.gsf"
+                export_to_gsf(
+                    height_profile=h_np,
+                    output_path=gsf_path,
+                    lattice_constant=env.params.lattice_constant_a,
+                    step=step,
+                    roughness=rms * env.params.lattice_constant_a,  # Convert to Angstrom
+                    coverage=coverage,
+                )
 
-            # Max Z per column
-            height_map = occupied_z.max(dim=2).values.float()  # (X, Y)
+                # Save PNG snapshot
+                fig, ax = plt.subplots(figsize=(8, 7))
+                im = ax.imshow(h_np, cmap="viridis", interpolation="nearest")
+                ax.set_xlabel("X", fontsize=11)
+                ax.set_ylabel("Y", fontsize=11)
+                ax.set_title(
+                    f"Step {step}: R={rms * env.params.lattice_constant_a:.2f}Å, θ={coverage:.3f}",
+                    fontsize=12,
+                    fontweight="bold",
+                )
+                plt.colorbar(im, ax=ax, label="Height (layers)")
+                plt.tight_layout()
+                plt.savefig(snapshots_dir / f"snapshot_{step:06d}.png", dpi=120)
+                plt.close()
 
-            # Roughness (RMS)
-            mean_h = height_map.mean()
-            sq_diff = (height_map - mean_h) ** 2
-            rms = torch.sqrt(sq_diff.mean()).item()
-
-            # Coverage (Total atoms / Surface Area)
-            # Or coverage of first layer? Usually total atoms deposited / sites
-            n_atoms = is_occupied.sum().item() - (X * Y)  # Subtract substrate
-            coverage = n_atoms / (X * Y)
-
-            # Composition
-            n_ti = (env.lattices == SpeciesType.TI.value).sum().item()
-            n_o = (env.lattices == SpeciesType.O.value).sum().item()
-
-            # Fractal Dimension (CPU)
-            h_np = height_map.cpu().numpy()
-            try:
-                fractal_dim = calculate_fractal_dimension(h_np)
-            except Exception:
-                fractal_dim = np.nan
-
-            # Scaling Exponents (Alpha, Beta)
-            # Update rolling window
-            recent_steps.append(step)
-            recent_roughnesses.append(rms)
-            if len(recent_steps) > max_recent:
-                recent_steps.pop(0)
-                recent_roughnesses.pop(0)
-
-            alpha, beta = np.nan, np.nan
-            if len(recent_steps) >= 10:
-                try:
-                    steps_array = np.array(recent_steps, dtype=float)
-                    roughnesses_array = np.array(recent_roughnesses)
-                    system_size = float(np.sqrt(lattice_size_xy * lattice_size_xy))
-                    scaling = fit_family_vicsek(steps_array, roughnesses_array, system_size)
-                    alpha = float(scaling["alpha"])
-                    beta = float(scaling["beta"])
-                except Exception:
-                    pass
-
-            # Store
-            step_list.append(step)
-            roughness_list.append(rms)
-            coverage_list.append(coverage)
-            n_ti_list.append(n_ti)
-            n_o_list.append(n_o)
-            fractal_dim_list.append(fractal_dim)
-            alpha_list.append(alpha)
-            beta_list.append(beta)
-
-            logger.info(
-                f"Step {step}/{steps} | Dep: {total_depositions}, Mov: {total_moves} | Rq: {rms:.4f}, Cov: {coverage:.4f}, Df: {fractal_dim:.3f}, a: {alpha:.2f}, b: {beta:.2f}"
-            )
-
-            # Save compressed numpy array
-            save_path = snapshots_dir / f"lattice_{step:06d}.npy"
-            np.save(save_path, env.lattices.cpu().numpy())
-
-            # Save GSF for Gwyddion
-            gsf_path = gwyddion_dir / f"snapshot_{step:06d}.gsf"
-            export_to_gsf(
-                height_profile=h_np,
-                output_path=gsf_path,
-                lattice_constant=env.params.lattice_constant_a,
-                step=step,
-                roughness=rms * env.params.lattice_constant_a,  # Convert to Angstrom
-                coverage=coverage,
-            )
-
-            # Save PNG snapshot
-            fig, ax = plt.subplots(figsize=(8, 7))
-            im = ax.imshow(h_np, cmap="viridis", interpolation="nearest")
-            ax.set_xlabel("X", fontsize=11)
-            ax.set_ylabel("Y", fontsize=11)
-            ax.set_title(
-                f"Step {step}: R={rms * env.params.lattice_constant_a:.2f}Å, θ={coverage:.3f}",
-                fontsize=12,
-                fontweight="bold",
-            )
-            plt.colorbar(im, ax=ax, label="Height (layers)")
-            plt.tight_layout()
-            plt.savefig(snapshots_dir / f"snapshot_{step:06d}.png", dpi=120)
-            plt.close()
+    # Final log if interrupted and not just logged
+    if interrupted and (len(step_list) == 0 or step_list[-1] != step):
+         # We need to be careful if step hasn't incremented yet (e.g. break at start)
+         # But loop variable 'step' leaks to here.
+         # If break happened at start of loop, 'step' is the value of the iteration that was about to start.
+         # But we haven't done the work for that step.
+         # So we should log 'step - 1' if step > 1.
+         final_step = step - 1 if step > 1 else 0
+         if final_step > 0 and (len(step_list) == 0 or step_list[-1] != final_step):
+             h_np, rms, coverage = log_metrics(final_step)
 
     total_time = time.time() - start_time
     logger.info(f"Simulation finished in {total_time:.2f}s")
-    logger.info(f"Average speed: {steps / total_time:.2f} steps/s")
+    # Fix speed calculation to use actual steps
+    actual_steps = step_list[-1] if len(step_list) > 0 else 0
+    if actual_steps > 0:
+        logger.info(f"Average speed: {actual_steps / total_time:.2f} steps/s")
+    else:
+        logger.info("Average speed: N/A (no steps completed)")
 
     # --- Save Data to CSV ---
     logger.info("Saving data to CSV...")
@@ -988,13 +1021,16 @@ def update_rates_subset(env, cached_rates, indices, offsets_tensor):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Massive Scale Agent Prediction")
-    parser.add_argument("--model", type=str, required=True, help="Path to trained model .pt file")
+    parser.add_argument("--model", type=str, required=False, help="Path to trained model .pt file")
     parser.add_argument(
         "--size", type=int, default=200, help="XY Lattice size (e.g. 200 for 200x200)"
     )
     parser.add_argument("--height", type=int, default=30, help="Z Lattice height")
     parser.add_argument("--steps", type=int, default=10000, help="Number of simulation steps")
     parser.add_argument("--snapshot", type=int, default=1000, help="Snapshot interval")
+    parser.add_argument("--no-agent", action="store_true", help="Disable agent (Pure KMC)")
+    parser.add_argument("--temperature", type=float, default=600.0, help="Temperature in Kelvin")
+    parser.add_argument("--flux", type=float, default=2.0, help="Deposition Flux (ML/s)")
 
     args = parser.parse_args()
 
@@ -1004,4 +1040,7 @@ if __name__ == "__main__":
         lattice_size_z=args.height,
         steps=args.steps,
         snapshot_interval=args.snapshot,
+        use_agent=not args.no_agent,
+        temperature=args.temperature,
+        flux=args.flux
     )
