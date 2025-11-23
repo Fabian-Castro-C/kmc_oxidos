@@ -605,7 +605,7 @@ def train_gpu_swarm():
                 parts = log["details"].split()
                 species = parts[1]
                 logger.info(
-                    f"  [{log['step']:3d}] DEPOSIT {species:<2}            → Reward: {log['reward']:+6.3f}, Agents: {log['n_agents']:3d} | {log['details']}"
+                    f"  [{log['step']:3d}] DEPOSIT {species:<2}            → Reward: {log['reward']:+6.3f}, Agents: {log['n_agents']:3d}, Steps: {log['env_steps']}/{log['env_max_steps']}, Done: {log['done']} | {log['details']}"
                 )
             else:
                 # Agent Action
@@ -613,7 +613,7 @@ def train_gpu_swarm():
                 parts = log["details"].split(" -> ")
                 action_name = parts[1]
                 logger.info(
-                    f"  [{log['step']:3d}] AGENT ACTION {action_name:<14} → Reward: {log['reward']:+6.3f}, Agents: {log['n_agents']:3d} | {log['details']}"
+                    f"  [{log['step']:3d}] AGENT ACTION {action_name:<14} → Reward: {log['reward']:+6.3f}, Agents: {log['n_agents']:3d}, Steps: {log['env_steps']}/{log['env_max_steps']}, Done: {log['done']} | {log['details']}"
                 )
 
         writer.add_scalar("charts/fps", fps, global_step)

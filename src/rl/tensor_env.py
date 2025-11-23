@@ -366,6 +366,10 @@ class TensorTiO2Env:
         self.prev_omega = current_omega
 
         self.steps += 1
+        # DEBUG PRINT
+        if self.steps[0].item() % 50 == 0:
+            print(f"DEBUG: Env 0 steps: {self.steps[0].item()}/{self.max_steps}")
+        
         terminated = self.steps >= self.max_steps
 
         if terminated.any():
