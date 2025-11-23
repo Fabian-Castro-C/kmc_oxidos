@@ -572,6 +572,15 @@ def run_massive_prediction(
             # we sample with replacement and then filter duplicates/conflicts.
             K_SAMPLES = 2048
             
+            # DEBUG: Check weights
+            # print(f"DEBUG: n_total={n_total}, block_sums_sum={block_sums.sum().item()}")
+            # print(f"DEBUG: block_sums stats: min={block_sums.min()}, max={block_sums.max()}")
+            
+            if block_sums.sum() == 0:
+                 # Should not happen if there are mobile atoms
+                 print("WARNING: All weights are zero!")
+                 continue
+            
             # 1. Sample Blocks
             # We sample K blocks first
             block_indices = torch.multinomial(block_sums, K_SAMPLES, replacement=True)
@@ -705,6 +714,9 @@ def run_massive_prediction(
                 keep_indices.append(i)
             
             keep_indices = torch.tensor(keep_indices, device=device)
+            
+            # DEBUG
+            print(f"DEBUG: Sampled {len(all_indices)} indices. Unique Src: {len(np.unique(src_cpu))}. Kept: {len(keep_indices)}")
             
             # Select valid events
             valid_x = x[keep_indices]
