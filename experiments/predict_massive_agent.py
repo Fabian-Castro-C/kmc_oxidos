@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import csv
 import logging
 import sys
 import time
@@ -205,6 +206,10 @@ def run_massive_prediction(
     # Initial snapshot
     # np.save(snapshots_dir / "lattice_000000.npy", env.lattices.cpu().numpy())
 
+    # CACHING INITIALIZATION
+    cached_logits = None
+    dirty_indices = None
+
     for step in range(1, steps + 1):
         # 1. Calculate Rates First (Physics)
         # We do this BEFORE inference to skip inference if we choose deposition.
@@ -272,78 +277,120 @@ def run_massive_prediction(
                     action_counts["DEPOSIT_TI"] += 1
                 else:
                     action_counts["DEPOSIT_O"] += 1
+
+                # Update Dirty Indices (Deposition)
+                center = torch.tensor([[dep_x, dep_y, dep_z]], device=device)
+                new_dirty = get_dirty_indices(env, center)
+                if dirty_indices is None:
+                    dirty_indices = new_dirty
+                else:
+                    dirty_indices = torch.cat([dirty_indices, new_dirty])
+                    dirty_indices = torch.unique(dirty_indices, dim=0)
         else:
             # --- DIFFUSION EVENT (Agent Action) ---
-            # Only NOW do we run the expensive inference
+            # Use Cached Logits for massive speedup
 
-            # 1. Get Observations & Inference (Chunked to avoid OOM)
-            logits_list = []
-            x_chunk_size = 50
-            num_neighbors = len(env.neighbor_offsets)
+            # 1. Update Cache
+            if cached_logits is None:
+                # First run: Full Inference (Chunked)
+                logits_list = []
+                x_chunk_size = 50
+                num_neighbors = len(env.neighbor_offsets)
 
-            # Pre-compute constant tensors for chunks
-            z_coords = torch.arange(Z, device=device, dtype=torch.float32)
-            obs_abs_z_template = z_coords.view(1, 1, 1, 1, Z).expand(B, 1, x_chunk_size, Y, Z)
-
-            obs_rel_z_template = torch.zeros((B, num_neighbors, x_chunk_size, Y, Z), device=device)
-            for i, val in enumerate(env.relative_z_values):
-                obs_rel_z_template[:, i, :, :, :] = val
-
-            for x_start in range(0, X, x_chunk_size):
-                x_end = min(x_start + x_chunk_size, X)
-                current_chunk_width = x_end - x_start
-
-                if current_chunk_width != x_chunk_size:
-                    this_obs_abs_z = obs_abs_z_template[:, :, :current_chunk_width, :, :]
-                    this_obs_rel_z = obs_rel_z_template[:, :, :current_chunk_width, :, :]
-                else:
-                    this_obs_abs_z = obs_abs_z_template
-                    this_obs_rel_z = obs_rel_z_template
-
-                indices = torch.arange(x_start - 1, x_end + 1, device=device) % X
-                lattice_slice = env.lattices[:, indices, :, :]
-
-                one_hot = torch.zeros(
-                    (B, 4, lattice_slice.shape[1], Y, Z), device=device, dtype=torch.float32
-                )
-                one_hot.scatter_(1, lattice_slice.unsqueeze(1).long(), 1.0)
-
-                obs_neighbors = torch.empty(
-                    (B, num_neighbors * 3, current_chunk_width, Y, Z),
-                    device=device,
-                    dtype=torch.float32,
+                # Pre-compute constant tensors for chunks
+                z_coords = torch.arange(Z, device=device, dtype=torch.float32)
+                obs_abs_z_template = z_coords.view(1, 1, 1, 1, Z).expand(
+                    B, 1, x_chunk_size, Y, Z
                 )
 
-                for i, (dx, dy, dz) in enumerate(env.neighbor_offsets):
-                    if dx == 1:
-                        sliced = one_hot[:, :, 2 : 2 + current_chunk_width, :, :]
-                    elif dx == -1:
-                        sliced = one_hot[:, :, 0:current_chunk_width, :, :]
+                obs_rel_z_template = torch.zeros(
+                    (B, num_neighbors, x_chunk_size, Y, Z), device=device
+                )
+                for i, val in enumerate(env.relative_z_values):
+                    obs_rel_z_template[:, i, :, :, :] = val
+
+                for x_start in range(0, X, x_chunk_size):
+                    x_end = min(x_start + x_chunk_size, X)
+                    current_chunk_width = x_end - x_start
+
+                    if current_chunk_width != x_chunk_size:
+                        this_obs_abs_z = obs_abs_z_template[
+                            :, :, :current_chunk_width, :, :
+                        ]
+                        this_obs_rel_z = obs_rel_z_template[
+                            :, :, :current_chunk_width, :, :
+                        ]
                     else:
-                        sliced = one_hot[:, :, 1 : 1 + current_chunk_width, :, :]
+                        this_obs_abs_z = obs_abs_z_template
+                        this_obs_rel_z = obs_rel_z_template
 
-                    if dy != 0 or dz != 0:
-                        sliced = torch.roll(sliced, shifts=(-dy, -dz), dims=(3, 4))
+                    indices = torch.arange(x_start - 1, x_end + 1, device=device) % X
+                    lattice_slice = env.lattices[:, indices, :, :]
 
-                    obs_neighbors[:, i * 3 : (i + 1) * 3] = sliced[:, 0:3]
+                    one_hot = torch.zeros(
+                        (B, 4, lattice_slice.shape[1], Y, Z),
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    one_hot.scatter_(1, lattice_slice.unsqueeze(1).long(), 1.0)
 
-                ti_indices = [i * 3 + 1 for i in range(num_neighbors)]
-                o_indices = [i * 3 + 2 for i in range(num_neighbors)]
-                n_ti = obs_neighbors[:, ti_indices].sum(dim=1, keepdim=True)
-                n_o = obs_neighbors[:, o_indices].sum(dim=1, keepdim=True)
+                    obs_neighbors = torch.empty(
+                        (B, num_neighbors * 3, current_chunk_width, Y, Z),
+                        device=device,
+                        dtype=torch.float32,
+                    )
 
-                full_obs_chunk = torch.cat(
-                    [obs_neighbors, this_obs_rel_z, n_ti, n_o, this_obs_abs_z], dim=1
-                )
-                flat_obs_chunk = full_obs_chunk.permute(0, 2, 3, 4, 1).reshape(-1, obs_dim)
+                    for i, (dx, dy, dz) in enumerate(env.neighbor_offsets):
+                        if dx == 1:
+                            sliced = one_hot[:, :, 2 : 2 + current_chunk_width, :, :]
+                        elif dx == -1:
+                            sliced = one_hot[:, :, 0:current_chunk_width, :, :]
+                        else:
+                            sliced = one_hot[:, :, 1 : 1 + current_chunk_width, :, :]
 
-                with torch.no_grad():
-                    chunk_logits = actor(flat_obs_chunk)
-                    logits_list.append(chunk_logits)
+                        if dy != 0 or dz != 0:
+                            sliced = torch.roll(sliced, shifts=(-dy, -dz), dims=(3, 4))
 
-                del full_obs_chunk, flat_obs_chunk, obs_neighbors, one_hot, lattice_slice
+                        obs_neighbors[:, i * 3 : (i + 1) * 3] = sliced[:, 0:3]
 
-            logits = torch.cat(logits_list, dim=0)
+                    ti_indices = [i * 3 + 1 for i in range(num_neighbors)]
+                    o_indices = [i * 3 + 2 for i in range(num_neighbors)]
+                    n_ti = obs_neighbors[:, ti_indices].sum(dim=1, keepdim=True)
+                    n_o = obs_neighbors[:, o_indices].sum(dim=1, keepdim=True)
+
+                    full_obs_chunk = torch.cat(
+                        [obs_neighbors, this_obs_rel_z, n_ti, n_o, this_obs_abs_z],
+                        dim=1,
+                    )
+                    flat_obs_chunk = full_obs_chunk.permute(0, 2, 3, 4, 1).reshape(
+                        -1, obs_dim
+                    )
+
+                    with torch.no_grad():
+                        chunk_logits = actor(flat_obs_chunk)
+                        logits_list.append(chunk_logits)
+
+                    del (
+                        full_obs_chunk,
+                        flat_obs_chunk,
+                        obs_neighbors,
+                        one_hot,
+                        lattice_slice,
+                    )
+
+                logits = torch.cat(logits_list, dim=0)
+                cached_logits = logits.view(X, Y, Z, 7)
+            elif dirty_indices is not None and len(dirty_indices) > 0:
+                # Partial Update
+                new_logits = compute_logits_subset(env, actor, dirty_indices)
+                # Update cache
+                cached_logits[
+                    dirty_indices[:, 0], dirty_indices[:, 1], dirty_indices[:, 2]
+                ] = new_logits
+                dirty_indices = None  # Reset
+
+            # Use cached logits
+            logits = cached_logits.view(-1, 7)
 
             # Physics masking/reweighting
             # We need to separate Diffusion rates from Desorption rates
@@ -424,6 +471,30 @@ def run_massive_prediction(
                 action_counts["DESORB"] += 1
             else:
                 action_counts["DIFFUSE"] += 1
+
+            # Update Dirty Indices (Diffusion)
+            src_x, src_y, src_z = x.item(), y.item(), z.item()
+            src_center = torch.tensor([[src_x, src_y, src_z]], device=device)
+            centers_to_update = [src_center]
+
+            if act_type < 6:  # Diffusion
+                dx, dy, dz = env.neighbor_offsets[act_type]
+                dst_x, dst_y, dst_z = (
+                    (src_x + dx) % X,
+                    (src_y + dy) % Y,
+                    (src_z + dz) % Z,
+                )
+                dst_center = torch.tensor([[dst_x, dst_y, dst_z]], device=device)
+                centers_to_update.append(dst_center)
+
+            centers_tensor = torch.cat(centers_to_update, dim=0)
+            new_dirty = get_dirty_indices(env, centers_tensor)
+
+            if dirty_indices is None:
+                dirty_indices = new_dirty
+            else:
+                dirty_indices = torch.cat([dirty_indices, new_dirty])
+                dirty_indices = torch.unique(dirty_indices, dim=0)
 
             # logger.info(f"Step {step}: Agent moved")
 
@@ -531,6 +602,38 @@ def run_massive_prediction(
     total_time = time.time() - start_time
     logger.info(f"Simulation finished in {total_time:.2f}s")
     logger.info(f"Average speed: {steps / total_time:.2f} steps/s")
+
+    # --- Save Data to CSV ---
+    logger.info("Saving data to CSV...")
+    csv_path = output_dir / "simulation_data.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(
+            [
+                "Step",
+                "Roughness",
+                "Coverage",
+                "Ti_Atoms",
+                "O_Atoms",
+                "Fractal_Dim",
+                "Alpha",
+                "Beta",
+            ]
+        )
+        for i in range(len(step_list)):
+            writer.writerow(
+                [
+                    step_list[i],
+                    roughness_list[i],
+                    coverage_list[i],
+                    n_ti_list[i],
+                    n_o_list[i],
+                    fractal_dim_list[i],
+                    alpha_list[i],
+                    beta_list[i],
+                ]
+            )
+    logger.info(f"Data saved to {csv_path}")
 
     # --- Plotting ---
     logger.info("Generating plots...")
@@ -682,6 +785,92 @@ def run_massive_prediction(
 
     logger.info(f"Results saved to {output_dir}")
 
+def get_dirty_indices(env, centers):
+    """
+    Get all indices that need updating (centers + neighbors).
+    centers: (K, 3) tensor of (x, y, z) coordinates.
+    """
+    offsets = torch.tensor(env.neighbor_offsets, device=env.device)  # (18, 3)
+    # Add (0,0,0) to offsets to include centers themselves
+    offsets = torch.cat(
+        [torch.zeros((1, 3), device=env.device, dtype=torch.long), offsets]
+    )
+
+    # Broadcast add: (K, 1, 3) + (1, 19, 3) -> (K, 19, 3)
+    neighbors = centers.unsqueeze(1) + offsets.unsqueeze(0)
+
+    X, Y, Z = env.lattices.shape[1:]
+
+    # Handle PBC for X and Y
+    neighbors[:, :, 0] %= X
+    neighbors[:, :, 1] %= Y
+
+    neighbors = neighbors.view(-1, 3)
+
+    # Filter invalid Z (assuming PBC for Z as per tensor_env implementation, but let's be safe)
+    # Actually tensor_env uses roll which implies PBC.
+    neighbors[:, 2] %= Z
+
+    return torch.unique(neighbors, dim=0)
+
+
+def compute_logits_subset(env, actor, indices):
+    """
+    Compute logits for a subset of indices.
+    indices: (N, 3) tensor.
+    Returns: (N, 7) logits tensor.
+    """
+    B, X, Y, Z = env.lattices.shape
+    N = indices.shape[0]
+    device = env.device
+
+    # 1. Gather Neighbors
+    offsets = torch.tensor(env.neighbor_offsets, device=device)  # (18, 3)
+
+    # (N, 1, 3) + (1, 18, 3) -> (N, 18, 3)
+    neighbor_coords = indices.unsqueeze(1) + offsets.unsqueeze(0)
+    neighbor_coords[:, :, 0] %= X
+    neighbor_coords[:, :, 1] %= Y
+    neighbor_coords[:, :, 2] %= Z  # PBC for Z
+
+    # Flatten coords for gathering
+    # Index = x*Y*Z + y*Z + z
+    flat_indices = (
+        neighbor_coords[:, :, 0] * Y * Z
+        + neighbor_coords[:, :, 1] * Z
+        + neighbor_coords[:, :, 2]
+    ).long()
+
+    # Gather lattice values
+    flat_lattice = env.lattices.view(-1)
+    neighbor_vals = flat_lattice[flat_indices]  # (N, 18)
+
+    # One-hot encoding
+    neighbor_vals_long = neighbor_vals.long()
+    one_hot = torch.zeros((N, 18, 4), device=device)
+    one_hot.scatter_(2, neighbor_vals_long.unsqueeze(2), 1.0)
+
+    obs_neighbors = one_hot[:, :, 0:3]  # (N, 18, 3)
+    obs_neighbors_flat = obs_neighbors.reshape(N, 54)
+
+    # 2. Relative Z
+    obs_rel_z = env.relative_z_values.unsqueeze(0).expand(N, 18)  # (N, 18)
+
+    # 3. Counts
+    n_ti = obs_neighbors[:, :, 1].sum(dim=1, keepdim=True)  # (N, 1)
+    n_o = obs_neighbors[:, :, 2].sum(dim=1, keepdim=True)  # (N, 1)
+
+    # 4. Absolute Z
+    obs_abs_z = indices[:, 2].float().unsqueeze(1)  # (N, 1)
+
+    # Concatenate
+    full_obs = torch.cat([obs_neighbors_flat, obs_rel_z, n_ti, n_o, obs_abs_z], dim=1)
+
+    # Run Actor
+    with torch.no_grad():
+        logits = actor(full_obs)
+
+    return logits
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Massive Scale Agent Prediction")
