@@ -100,6 +100,9 @@ def run_massive_prediction(
     lattice_size_z: int,
     steps: int,
     snapshot_interval: int,
+    use_agent: bool = True,
+    temperature: float = 600.0,
+    flux: float = 2.0,
     device_name: str = "cuda",
 ):
     # --- Setup ---
@@ -146,8 +149,8 @@ def run_massive_prediction(
     # Use higher flux to promote island nucleation (Volmer-Weber)
     # Low flux (0.2) allows too much diffusion time -> flattening.
     # High flux (2.0) forces atoms to nucleate new islands.
-    env.flux_ti = 2.0
-    env.flux_o = 4.0
+    env.flux_ti = flux
+    env.flux_o = flux * 2.0
 
     # PATCH: Disable full observation generation to save memory
     # The script manually computes observations in chunks, so we don't need
@@ -161,27 +164,31 @@ def run_massive_prediction(
     # Training used 600K. Let's try 1000K to see if diffusion activates.
     # Rate = v0 * exp(-Ea / kT)
     # Higher T -> Higher Rate
-    env.physics.kT = env.params.k_boltzmann * 600.0
+    env.physics.kT = env.params.k_boltzmann * temperature
 
     # Debug logging for rates
-    logger.info(f"Flux Ti: {env.flux_ti}, Flux O: {env.flux_o}, T: 600K")
+    logger.info(f"Flux Ti: {env.flux_ti}, Flux O: {env.flux_o}, T: {temperature}K")
 
     # --- Load Agent ---
-    logger.info(f"Loading model from {model_path}...")
-    checkpoint = torch.load(model_path, map_location=device)
+    actor = None
+    if use_agent and model_path:
+        logger.info(f"Loading model from {model_path}...")
+        checkpoint = torch.load(model_path, map_location=device)
 
-    # Initialize networks
-    # TensorTiO2Env produces obs of size 75 (18*3 neighbors + 18 rel_z + 2 counts + 1 abs_z)
-    obs_dim = 75
-    actor = Actor(obs_dim, N_ACTIONS).to(device)
-    critic = Critic(obs_dim).to(device)
+        # Initialize networks
+        # TensorTiO2Env produces obs of size 75 (18*3 neighbors + 18 rel_z + 2 counts + 1 abs_z)
+        obs_dim = 75
+        actor = Actor(obs_dim, N_ACTIONS).to(device)
+        # critic = Critic(obs_dim).to(device)
 
-    actor.load_state_dict(checkpoint["actor"])
-    critic.load_state_dict(checkpoint["critic"])
-    actor.eval()
-    critic.eval()
+        actor.load_state_dict(checkpoint["actor"])
+        # critic.load_state_dict(checkpoint["critic"])
+        actor.eval()
+        # critic.eval()
 
-    logger.info("Model loaded successfully.")
+        logger.info("Model loaded successfully.")
+    else:
+        logger.info("Running in Pure KMC mode (No Agent).")
 
     # --- Simulation Loop ---
     logger.info(f"Starting simulation for {steps} steps...")
