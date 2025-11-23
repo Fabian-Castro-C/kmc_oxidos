@@ -67,8 +67,8 @@ class TiO2Parameters:
     # - Local coordination
     # - Charge state
     # - Coverage
-    ea_diff_ti: float = 0.6  # eV (typical range: 0.4-0.8 eV)
-    ea_diff_o: float = 0.8  # eV (typically higher than Ti)
+    ea_diff_ti: float = 0.3  # eV (typical range: 0.4-0.8 eV)
+    ea_diff_o: float = 0.4  # eV (typically higher than Ti)
 
     # Ehrlich-Schwoebel barrier (additional barrier for descending step edges)
     ea_es: float = 0.15  # eV (typical range: 0.1-0.2 eV, ~20-25% of ea_diff)
