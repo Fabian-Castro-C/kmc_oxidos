@@ -133,7 +133,7 @@ TRAINING_CONFIG = {
     "total_timesteps": 100_000_000,  # 100M steps for deep convergence on RTX 5090
     # Rollout collection
     "num_steps": 256,  # Short rollouts for frequent updates
-    "num_envs": 512,  # Reduced to 256 to fit in VRAM (Batch = 256 * 256 = 65k)
+    "num_envs": 256,  # Reduced to 256 to fit in VRAM (Batch = 256 * 256 = 65k)
     # Note: Swarm architecture processes EVERY atom as an agent.
     # 256 envs * 8000 sites = 2,048,000 agents per forward pass.
     # This consumes ~5-6GB VRAM for activations.
