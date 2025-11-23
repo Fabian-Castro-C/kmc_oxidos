@@ -129,8 +129,11 @@ def run_massive_prediction(
         device=device,
     )
     # Manually set fluxes (since they are not in __init__)
-    env.flux_ti = 5.0
-    env.flux_o = 10.0
+    # Use very low flux to allow diffusion (similar to training)
+    # Training default was 1.0/2.0, but for massive scale we need to be careful.
+    # If we want to see island formation, diffusion must be faster than deposition.
+    env.flux_ti = 0.2
+    env.flux_o = 0.4
 
     # Debug logging for rates
     logger.info(f"Flux Ti: {env.flux_ti}, Flux O: {env.flux_o}")
@@ -185,7 +188,7 @@ def run_massive_prediction(
         # 1. Calculate Rates First (Physics)
         # We do this BEFORE inference to skip inference if we choose deposition.
         B, X, Y, Z = env.lattices.shape
-        
+
         base_rates = env.physics.calculate_diffusion_rates(env.lattices)
         total_diff_rate = base_rates.sum()
 
@@ -201,7 +204,9 @@ def run_massive_prediction(
         p_dep = R_dep_total / (R_total + 1e-10)
 
         if step % 100 == 0:
-             logger.info(f"Rates - Dep: {R_dep_total:.2e}, Diff: {total_diff_rate:.2e}, p_dep: {p_dep:.4f}")
+            logger.info(
+                f"Rates - Dep: {R_dep_total:.2e}, Diff: {total_diff_rate:.2e}, p_dep: {p_dep:.4f}"
+            )
 
         if torch.rand(1, device=device) < p_dep:
             # --- DEPOSITION EVENT ---
@@ -232,16 +237,16 @@ def run_massive_prediction(
         else:
             # --- DIFFUSION EVENT (Agent Action) ---
             # Only NOW do we run the expensive inference
-            
+
             # 1. Get Observations & Inference (Chunked to avoid OOM)
             logits_list = []
-            x_chunk_size = 50 
+            x_chunk_size = 50
             num_neighbors = len(env.neighbor_offsets)
-            
+
             # Pre-compute constant tensors for chunks
             z_coords = torch.arange(Z, device=device, dtype=torch.float32)
             obs_abs_z_template = z_coords.view(1, 1, 1, 1, Z).expand(B, 1, x_chunk_size, Y, Z)
-            
+
             obs_rel_z_template = torch.zeros((B, num_neighbors, x_chunk_size, Y, Z), device=device)
             for i, val in enumerate(env.relative_z_values):
                 obs_rel_z_template[:, i, :, :, :] = val
@@ -249,7 +254,7 @@ def run_massive_prediction(
             for x_start in range(0, X, x_chunk_size):
                 x_end = min(x_start + x_chunk_size, X)
                 current_chunk_width = x_end - x_start
-                
+
                 if current_chunk_width != x_chunk_size:
                     this_obs_abs_z = obs_abs_z_template[:, :, :current_chunk_width, :, :]
                     this_obs_rel_z = obs_rel_z_template[:, :, :current_chunk_width, :, :]
@@ -259,39 +264,47 @@ def run_massive_prediction(
 
                 indices = torch.arange(x_start - 1, x_end + 1, device=device) % X
                 lattice_slice = env.lattices[:, indices, :, :]
-                
-                one_hot = torch.zeros((B, 4, lattice_slice.shape[1], Y, Z), device=device, dtype=torch.float32)
+
+                one_hot = torch.zeros(
+                    (B, 4, lattice_slice.shape[1], Y, Z), device=device, dtype=torch.float32
+                )
                 one_hot.scatter_(1, lattice_slice.unsqueeze(1).long(), 1.0)
-                
-                obs_neighbors = torch.empty((B, num_neighbors * 3, current_chunk_width, Y, Z), device=device, dtype=torch.float32)
-                
+
+                obs_neighbors = torch.empty(
+                    (B, num_neighbors * 3, current_chunk_width, Y, Z),
+                    device=device,
+                    dtype=torch.float32,
+                )
+
                 for i, (dx, dy, dz) in enumerate(env.neighbor_offsets):
                     if dx == 1:
                         sliced = one_hot[:, :, 2 : 2 + current_chunk_width, :, :]
                     elif dx == -1:
-                        sliced = one_hot[:, :, 0 : current_chunk_width, :, :]
+                        sliced = one_hot[:, :, 0:current_chunk_width, :, :]
                     else:
                         sliced = one_hot[:, :, 1 : 1 + current_chunk_width, :, :]
-                    
+
                     if dy != 0 or dz != 0:
                         sliced = torch.roll(sliced, shifts=(-dy, -dz), dims=(3, 4))
-                    
+
                     obs_neighbors[:, i * 3 : (i + 1) * 3] = sliced[:, 0:3]
 
                 ti_indices = [i * 3 + 1 for i in range(num_neighbors)]
                 o_indices = [i * 3 + 2 for i in range(num_neighbors)]
                 n_ti = obs_neighbors[:, ti_indices].sum(dim=1, keepdim=True)
                 n_o = obs_neighbors[:, o_indices].sum(dim=1, keepdim=True)
-                
-                full_obs_chunk = torch.cat([obs_neighbors, this_obs_rel_z, n_ti, n_o, this_obs_abs_z], dim=1)
+
+                full_obs_chunk = torch.cat(
+                    [obs_neighbors, this_obs_rel_z, n_ti, n_o, this_obs_abs_z], dim=1
+                )
                 flat_obs_chunk = full_obs_chunk.permute(0, 2, 3, 4, 1).reshape(-1, obs_dim)
-                
+
                 with torch.no_grad():
                     chunk_logits = actor(flat_obs_chunk)
                     logits_list.append(chunk_logits)
-                
+
                 del full_obs_chunk, flat_obs_chunk, obs_neighbors, one_hot, lattice_slice
-            
+
             logits = torch.cat(logits_list, dim=0)
 
             # Physics masking/reweighting
@@ -310,24 +323,24 @@ def run_massive_prediction(
             block_size = 10_000_000
             max_logit = flat_logits.max()
             weights = torch.exp(flat_logits - max_logit)
-            
+
             num_blocks = (n_total + block_size - 1) // block_size
             block_sums = torch.zeros(num_blocks, device=device)
-            
+
             for i in range(num_blocks):
                 start = i * block_size
                 end = min(start + block_size, n_total)
                 block_sums[i] = weights[start:end].sum()
-                
+
             block_idx = torch.multinomial(block_sums, 1).item()
-            
+
             start = block_idx * block_size
             end = min(start + block_size, n_total)
             block_weights = weights[start:end]
-            
+
             local_idx = torch.multinomial(block_weights, 1).item()
             global_idx = start + local_idx
-            
+
             env_action_indices = torch.tensor([global_idx], device=device)
 
             # Decode index
@@ -341,7 +354,7 @@ def run_massive_prediction(
             x = temp // Y
 
             agent_actions = torch.stack([x, y, z, a], dim=1)
-            
+
             env.step(agent_actions)
             total_moves += 1
 
