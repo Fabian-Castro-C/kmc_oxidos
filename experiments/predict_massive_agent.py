@@ -220,18 +220,11 @@ def run_massive_prediction(
             base_rates = env.physics.calculate_diffusion_rates(env.lattices)
             cached_base_rates = base_rates
         elif dirty_indices is not None and len(dirty_indices) > 0:
-             # Partial Update of Rates
-             # We need to update rates for dirty_indices
-             # But calculate_diffusion_rates works on the whole lattice or we need a partial version
-             # For now, let's just re-calculate full rates only when dirty, but wait...
-             # calculate_diffusion_rates is fast on GPU, but doing it every step is still overhead.
-             # Let's try to optimize:
-             # Actually, calculate_diffusion_rates is O(N) and very optimized.
-             # The bottleneck might be the .sum() or the transfer.
-             base_rates = env.physics.calculate_diffusion_rates(env.lattices)
-             cached_base_rates = base_rates
+            # Partial Update of Rates (Optimized)
+            update_rates_subset(env, cached_base_rates, dirty_indices)
+            base_rates = cached_base_rates
         else:
-             base_rates = cached_base_rates
+            base_rates = cached_base_rates
 
         total_diff_rate = base_rates.sum()
 
@@ -888,6 +881,91 @@ def compute_logits_subset(env, actor, indices):
         logits = actor(full_obs)
 
     return logits
+
+def update_rates_subset(env, cached_rates, indices):
+    """
+    Update rates for specific indices in-place using Open Boundaries (matching tensor_rates.py).
+    indices: (N, 3) tensor
+    """
+    # 1. Get Neighbors (6 nearest) for Coordination
+    # (0,0,1), (0,0,-1), (0,1,0), (0,-1,0), (1,0,0), (-1,0,0)
+    offsets = torch.tensor(
+        [[0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0], [1, 0, 0], [-1, 0, 0]],
+        device=env.device,
+    )
+
+    # Expand indices: (N, 1, 3) + (1, 6, 3) -> (N, 6, 3)
+    neighbor_coords = indices.unsqueeze(1) + offsets.unsqueeze(0)
+
+    # Handle Boundaries (Open - match tensor_rates.py)
+    # We need to mask out-of-bounds neighbors
+    X, Y, Z = env.lattices.shape[1:]
+
+    valid_x = (neighbor_coords[:, :, 0] >= 0) & (neighbor_coords[:, :, 0] < X)
+    valid_y = (neighbor_coords[:, :, 1] >= 0) & (neighbor_coords[:, :, 1] < Y)
+    valid_z = (neighbor_coords[:, :, 2] >= 0) & (neighbor_coords[:, :, 2] < Z)
+    valid_mask = valid_x & valid_y & valid_z  # (N, 6)
+
+    # Clamp coords to avoid error during gather (we will mask result later)
+    neighbor_coords[:, :, 0].clamp_(0, X - 1)
+    neighbor_coords[:, :, 1].clamp_(0, Y - 1)
+    neighbor_coords[:, :, 2].clamp_(0, Z - 1)
+
+    # Gather values
+    # env.lattices is (B, X, Y, Z). B=1.
+    flat_lattice = env.lattices[0].view(-1)  # (X*Y*Z)
+
+    flat_indices = (
+        neighbor_coords[:, :, 0] * Y * Z
+        + neighbor_coords[:, :, 1] * Z
+        + neighbor_coords[:, :, 2]
+    ).long()
+
+    neighbor_vals = flat_lattice[flat_indices]  # (N, 6)
+
+    # Check occupancy
+    is_occupied = (neighbor_vals != SpeciesType.VACANT.value).float()
+
+    # Apply mask (zero out invalid neighbors)
+    is_occupied = is_occupied * valid_mask.float()
+
+    # Coordination Number
+    coordination = is_occupied.sum(dim=1)  # (N,)
+
+    # 2. Calculate Rates for Center Sites
+    # Get species at center
+    center_flat_indices = (
+        indices[:, 0] * Y * Z + indices[:, 1] * Z + indices[:, 2]
+    ).long()
+    center_species = flat_lattice[center_flat_indices]
+
+    # Base Energies
+    E_diff_ti = env.physics.E_diff_ti
+    E_diff_o = env.physics.E_diff_o
+
+    base_energies = torch.ones_like(coordination) * 10.0  # Default high
+    base_energies[center_species == SpeciesType.TI.value] = E_diff_ti
+    base_energies[center_species == SpeciesType.O.value] = E_diff_o
+
+    # Activation Energy
+    # Ea = E_base * (1 + 3.0 * (N / 6))
+    coordination_factor = coordination / 6.0
+    activation_energies = base_energies * (1.0 + 3.0 * coordination_factor)
+
+    # Rate
+    # Rate = nu0 * exp(-Ea / kT)
+    rates = env.physics.nu0 * torch.exp(-activation_energies / env.physics.kT)
+
+    # Mask Vacant/Substrate (Rate = 0)
+    is_mobile = (center_species != SpeciesType.VACANT.value) & (
+        center_species != SpeciesType.SUBSTRATE.value
+    )
+    rates[~is_mobile] = 0.0
+
+    # Update Cache
+    cached_rates[0, indices[:, 0], indices[:, 1], indices[:, 2]] = rates
+
+    return cached_rates
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Massive Scale Agent Prediction")
