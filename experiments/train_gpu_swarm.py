@@ -321,7 +321,13 @@ def train_gpu_swarm():
             # Log Agent Action (Env 0 only)
             if not should_deposit[0]:
                 act_idx = agent_actions[0, 3].item()
-                act_name = ["UP", "DOWN", "LEFT", "RIGHT", "FORWARD", "BACKWARD"][act_idx]
+                # Action mapping from tensor_env.py: 0:X+, 1:X-, 2:Y+, 3:Y-, 4:Z+, 5:Z-, 6:DESORB
+                act_names = ["X+", "X-", "Y+", "Y-", "Z+", "Z-", "DESORB"]
+                if act_idx < len(act_names):
+                    act_name = act_names[act_idx]
+                else:
+                    act_name = f"UNKNOWN({act_idx})"
+                
                 detailed_log_steps.append(
                     f"Step {step}: Agent at ({agent_actions[0,0]}, {agent_actions[0,1]}, {agent_actions[0,2]}) moved {act_name}"
                 )
