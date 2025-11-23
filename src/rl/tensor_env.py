@@ -326,8 +326,8 @@ class TensorTiO2Env:
 
             # Only allow move if destination is VACANT (Hopping mechanism)
             # If destination is occupied, the move is rejected (no-op)
-            is_vacant = (dst_val == SpeciesType.VACANT.value)
-            
+            is_vacant = dst_val == SpeciesType.VACANT.value
+
             if is_vacant.any():
                 # Apply filter again for valid moves
                 mb = mb[is_vacant]
@@ -342,8 +342,8 @@ class TensorTiO2Env:
 
                 # Move Atom IDs
                 src_id = self.atom_ids[mb, mx, my, mz]
-                dst_id = self.atom_ids[mb, mtx, mty, mtz] # Should be 0 (Vacant)
-                
+                dst_id = self.atom_ids[mb, mtx, mty, mtz]  # Should be 0 (Vacant)
+
                 self.atom_ids[mb, mx, my, mz] = dst_id
                 self.atom_ids[mb, mtx, mty, mtz] = src_id
 
@@ -366,7 +366,7 @@ class TensorTiO2Env:
         self.prev_omega = current_omega
 
         self.steps += 1
-        
+
         terminated = self.steps >= self.max_steps
 
         if terminated.any():
@@ -379,7 +379,7 @@ class TensorTiO2Env:
         # Use direct assignment for advanced indexing to ensure in-place modification
         self.lattices[env_indices] = SpeciesType.VACANT.value
         self.lattices[env_indices, :, :, 0] = SpeciesType.SUBSTRATE.value
-        
+
         self.atom_ids[env_indices] = 0
         self.next_atom_id[env_indices] = 1
         self.steps[env_indices] = 0
@@ -416,10 +416,7 @@ class TensorTiO2Env:
         # Assign new Atom IDs
         # Get current next_ids for these envs
         current_ids = self.next_atom_id[env_indices]
-        self.atom_ids.index_put_(
-            (env_indices, x, y, z),
-            current_ids
-        )
+        self.atom_ids.index_put_((env_indices, x, y, z), current_ids)
         # Increment counters
         self.next_atom_id[env_indices] += 1
 

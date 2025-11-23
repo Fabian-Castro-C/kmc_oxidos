@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from datetime import datetime
 
 from src.kmc.lattice import SpeciesType
-from src.rl.action_space import N_ACTIONS, ActionType
+from src.rl.action_space import N_ACTIONS
 from src.rl.shared_policy import Actor, Critic
 from src.rl.tensor_env import TensorTiO2Env
 
@@ -176,7 +176,9 @@ def train_gpu_swarm():
     )
 
     # TensorBoard
-    run_name = current_config.get("run_name", f"gpu_swarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+    run_name = current_config.get(
+        "run_name", f"gpu_swarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
     writer = SummaryWriter(f"experiments/results/train/{run_name}")
     logger.info(f"Logging to experiments/results/train/{run_name}")
 
@@ -322,12 +324,12 @@ def train_gpu_swarm():
             if not should_deposit[0]:
                 lx, ly, lz = agent_actions[0, 0], agent_actions[0, 1], agent_actions[0, 2]
                 log_agent_id = env.atom_ids[0, lx, ly, lz].item()
-                
+
                 act_idx = agent_actions[0, 3].item()
                 # Action mapping from tensor_env.py: 0:X+, 1:X-, 2:Y+, 3:Y-, 4:Z+, 5:Z-, 6:DESORB
                 act_names = ["X+", "X-", "Y+", "Y-", "Z+", "Z-", "DESORB"]
                 act_name = act_names[act_idx] if act_idx < len(act_names) else f"UNKNOWN({act_idx})"
-                
+
                 log_action_type = "Agent Action"
                 log_details = f"Agent #{log_agent_id} at ({lx},{ly},{lz}) -> {act_name}"
 
@@ -350,21 +352,21 @@ def train_gpu_swarm():
 
                 # Find max Z (highest occupied index + 1)
                 cols = env.lattices[dep_indices, dep_x, dep_y, :]
-                is_occupied = (cols != SpeciesType.VACANT.value)
-                
+                is_occupied = cols != SpeciesType.VACANT.value
+
                 # Create indices tensor [0, 1, ..., Z-1]
                 z_indices = torch.arange(Z, device=device).expand_as(cols)
-                
+
                 # Mask indices where not occupied, then take max
                 occupied_indices = torch.where(is_occupied, z_indices, torch.zeros_like(z_indices))
                 max_z = occupied_indices.max(dim=1).values
-                
+
                 # If column is empty (only substrate at 0), max_z is 0. dep_z is 1.
                 dep_z = max_z + 1
-                
+
                 # Filter out columns that are full (dep_z >= Z)
                 valid_dep = dep_z < Z
-                
+
                 if valid_dep.any():
                     # Filter everything
                     dep_indices = dep_indices[valid_dep]
@@ -372,7 +374,7 @@ def train_gpu_swarm():
                     dep_y = dep_y[valid_dep]
                     dep_z = dep_z[valid_dep]
                     is_ti = is_ti[valid_dep]
-                    
+
                     dep_coords = torch.stack([dep_x, dep_y, dep_z], dim=1)
 
                     if is_ti.any():
@@ -399,7 +401,7 @@ def train_gpu_swarm():
                             species = "Ti" if is_ti_0 else "O"
                             # Get the ID of the newly deposited atom
                             new_id = env.atom_ids[0, dep_x[idx], dep_y[idx], dep_z[idx]].item()
-                            
+
                             log_action_type = "Deposition"
                             log_details = f"Deposit {species} #{new_id} at ({dep_x[idx]},{dep_y[idx]},{dep_z[idx]})"
 
