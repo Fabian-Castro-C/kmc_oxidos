@@ -135,8 +135,14 @@ def run_massive_prediction(
     env.flux_ti = 0.2
     env.flux_o = 0.4
 
+    # Increase temperature to boost diffusion rates
+    # Training used 600K. Let's try 1000K to see if diffusion activates.
+    # Rate = v0 * exp(-Ea / kT)
+    # Higher T -> Higher Rate
+    env.physics.kT = env.params.k_boltzmann * 1000.0
+
     # Debug logging for rates
-    logger.info(f"Flux Ti: {env.flux_ti}, Flux O: {env.flux_o}")
+    logger.info(f"Flux Ti: {env.flux_ti}, Flux O: {env.flux_o}, T: 1000K")
 
     # --- Load Agent ---
     logger.info(f"Loading model from {model_path}...")
@@ -451,6 +457,21 @@ def run_massive_prediction(
                 roughness=rms * env.params.lattice_constant_a,  # Convert to Angstrom
                 coverage=coverage,
             )
+
+            # Save PNG snapshot
+            fig, ax = plt.subplots(figsize=(8, 7))
+            im = ax.imshow(h_np, cmap="viridis", interpolation="nearest")
+            ax.set_xlabel("X", fontsize=11)
+            ax.set_ylabel("Y", fontsize=11)
+            ax.set_title(
+                f"Step {step}: R={rms * env.params.lattice_constant_a:.2f}Å, θ={coverage:.3f}",
+                fontsize=12,
+                fontweight="bold",
+            )
+            plt.colorbar(im, ax=ax, label="Height (layers)")
+            plt.tight_layout()
+            plt.savefig(snapshots_dir / f"snapshot_{step:06d}.png", dpi=120)
+            plt.close()
 
     total_time = time.time() - start_time
     logger.info(f"Simulation finished in {total_time:.2f}s")
