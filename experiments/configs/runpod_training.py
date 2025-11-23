@@ -134,7 +134,7 @@ TRAINING_CONFIG = {
     "total_timesteps": 100_000_000,  # 100M steps for deep convergence on RTX 5090
     # Rollout collection
     "num_steps": 256,  # Short rollouts for frequent updates
-    "num_envs": 128,  # Reduced to 128 to allow larger minibatch and faster updates
+    "num_envs": 64,  # Reduced to 128 to allow larger minibatch and faster updates
     # Note: Swarm architecture processes EVERY atom as an agent.
     # 128 envs * 8000 sites = 1,024,000 agents per forward pass.
     # --- NEW ---
