@@ -137,7 +137,8 @@ def run_massive_prediction(
     checkpoint = torch.load(model_path, map_location=device)
 
     # Initialize networks
-    obs_dim = 58  # Standard observation dimension
+    # TensorTiO2Env produces obs of size 75 (18*3 neighbors + 18 rel_z + 2 counts + 1 abs_z)
+    obs_dim = 75 
     actor = Actor(obs_dim, N_ACTIONS).to(device)
     critic = Critic(obs_dim).to(device)
 
