@@ -22,6 +22,8 @@ from torch.utils.tensorboard import SummaryWriter
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from datetime import datetime
+
 from src.kmc.lattice import SpeciesType
 from src.rl.action_space import N_ACTIONS, ActionType
 from src.rl.shared_policy import Actor, Critic
@@ -168,7 +170,7 @@ def train_gpu_swarm():
     )
 
     # TensorBoard
-    run_name = current_config.get("run_name", f"gpu_swarm_{int(time.time())}")
+    run_name = current_config.get("run_name", f"gpu_swarm_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     writer = SummaryWriter(f"experiments/results/train/{run_name}")
     logger.info(f"Logging to experiments/results/train/{run_name}")
 
