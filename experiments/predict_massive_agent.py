@@ -716,7 +716,7 @@ def run_massive_prediction(
             keep_indices = torch.tensor(keep_indices, device=device)
             
             # DEBUG
-            print(f"DEBUG: Sampled {len(all_indices)} indices. Unique Src: {len(np.unique(src_cpu))}. Kept: {len(keep_indices)}")
+            # print(f"DEBUG: Sampled {len(all_indices)} indices. Unique Src: {len(np.unique(src_cpu))}. Kept: {len(keep_indices)}")
             
             # Select valid events
             valid_x = x[keep_indices]
