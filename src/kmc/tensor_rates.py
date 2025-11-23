@@ -38,6 +38,19 @@ class TensorRateCalculator:
         for idx in neighbors:
             self.kernel_coordination[0, 0, idx[0], idx[1], idx[2]] = 1.0
 
+        # Kernel 2: Barrier calculation (Exclude Z-1, because substrate bond is in E_diff_base)
+        self.kernel_barrier = torch.zeros((1, 1, 3, 3, 3), device=device)
+        barrier_neighbors = [
+            (1, 1, 2),  # Z+1 (Buried -> High barrier)
+            # (1, 1, 0),  # Z-1 (Substrate -> Included in base)
+            (1, 2, 1),  # Y+1
+            (1, 0, 1),  # Y-1
+            (2, 1, 1),  # X+1
+            (0, 1, 1),  # X-1
+        ]
+        for idx in barrier_neighbors:
+            self.kernel_barrier[0, 0, idx[0], idx[1], idx[2]] = 1.0
+
         # Pre-calculate rate constants (Arrhenius)
         # Rate = v0 * exp(-Ea / kT)
         # We can vectorize this: Rate = v0 * exp(-(E_base + n*E_bond) / kT)
@@ -74,16 +87,22 @@ class TensorRateCalculator:
         # 2. Convolve to get coordination number for every site
         # Padding=1 ensures we handle boundaries (requires careful PBC handling later)
         # For now, zero-padding is used (open boundaries)
-        coordination_map = F.conv3d(occupancy, self.kernel_coordination, padding=1)
+        # Use kernel_barrier instead of kernel_coordination for Ea calculation
+        coordination_map = F.conv3d(occupancy, self.kernel_barrier, padding=1)
 
         # Remove channel dim
         coordination_map = coordination_map.squeeze(1) if is_batch else coordination_map.squeeze()
 
         # 3. Calculate Activation Energy for every site
-        # Ea = E_base + (Coordination * |E_bond|)
-        # Note: E_bond is negative (-4.5 eV), so we subtract it to increase the barrier.
-        # Breaking bonds requires energy, so more neighbors = higher barrier.
-        activation_energies = self.E_diff_base - (coordination_map * self.E_bond)
+        # MATCH CPU LOGIC (src/kmc/rates.py):
+        # effective_ea = activation_energy * (1.0 + 0.5 * coordination_factor)
+        # where coordination_factor = coordination / 6.0
+        
+        # coordination_map contains N (number of neighbors)
+        coordination_factor = coordination_map / 6.0
+        
+        # We use E_diff_base as the base activation energy
+        activation_energies = self.E_diff_base * (1.0 + 0.5 * coordination_factor)
 
         # 4. Calculate Rates (Arrhenius)
         # Rate = nu0 * exp(-Ea / kT)
