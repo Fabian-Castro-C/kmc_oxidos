@@ -217,10 +217,10 @@ def run_massive_prediction(
         p_dep = R_dep_total / (R_total + 1e-10)
 
         # --- VISUALIZATION FIX: Minimum Deposition Probability ---
-        # Ensure at least 5% of events are depositions to guarantee growth visualization
+        # Ensure at least 10% of events are depositions to guarantee growth visualization
         # Otherwise we just watch diffusion for millions of steps
         # This matches the logic in train_gpu_swarm.py: p_dep = torch.clamp(p_dep, min=0.05)
-        p_dep = max(p_dep, 0.05)
+        p_dep = max(p_dep, 0.10)
 
         if step % 100 == 0:
             logger.info(

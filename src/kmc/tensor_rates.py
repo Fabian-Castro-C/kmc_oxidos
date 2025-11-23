@@ -45,8 +45,9 @@ class TensorRateCalculator:
         self.nu0 = 1e13  # Attempt frequency (Hz)
 
         # Energy parameters
-        self.E_diff_base = params.ea_diff_ti  # Base diffusion barrier
-        self.E_bond = params.bond_energy_ti_o  # Bond energy contribution
+        self.E_diff_ti = params.ea_diff_ti
+        self.E_diff_o = params.ea_diff_o
+        self.E_bond = params.bond_energy_ti_o
 
     def calculate_diffusion_rates(self, lattice_state: torch.Tensor):
         """
@@ -80,11 +81,18 @@ class TensorRateCalculator:
         coordination_map = coordination_map.squeeze(1) if is_batch else coordination_map.squeeze()
 
         # 3. Calculate Activation Energy for every site
+        # Use species-specific base barriers
+        base_energies = torch.zeros_like(lattice_state, dtype=torch.float32)
+        base_energies[lattice_state == SpeciesType.TI.value] = self.E_diff_ti
+        base_energies[lattice_state == SpeciesType.O.value] = self.E_diff_o
+        # Substrate/Vacant dummy values (masked later)
+        base_energies[lattice_state == SpeciesType.SUBSTRATE.value] = 10.0
+        base_energies[lattice_state == SpeciesType.VACANT.value] = 10.0
+
         # Use a coordination-dependent scaling factor (Soft Barrier)
-        # This matches the logic that allows diffusion at 600K
         # Ea = E_base * (1 + 0.5 * (N / 6))
         coordination_factor = coordination_map / 6.0
-        activation_energies = self.E_diff_base * (1.0 + 0.5 * coordination_factor)
+        activation_energies = base_energies * (1.0 + 0.5 * coordination_factor)
 
         # 4. Calculate Rates (Arrhenius)
         # Rate = nu0 * exp(-Ea / kT)
