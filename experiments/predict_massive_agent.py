@@ -132,11 +132,11 @@ def run_massive_prediction(
         max_steps=1_000_000_000,
     )
     # Manually set fluxes (since they are not in __init__)
-    # Use very low flux to allow diffusion (similar to training)
-    # Training default was 1.0/2.0, but for massive scale we need to be careful.
-    # If we want to see island formation, diffusion must be faster than deposition.
-    env.flux_ti = 0.2
-    env.flux_o = 0.4
+    # Use higher flux to promote island nucleation (Volmer-Weber)
+    # Low flux (0.2) allows too much diffusion time -> flattening.
+    # High flux (2.0) forces atoms to nucleate new islands.
+    env.flux_ti = 2.0
+    env.flux_o = 4.0
 
     # Increase temperature to boost diffusion rates
     # Training used 600K. Let's try 1000K to see if diffusion activates.
