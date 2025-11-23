@@ -153,10 +153,16 @@ def train_gpu_swarm():
     num_envs = current_config.get("num_envs", 64)
     total_timesteps = current_config.get("total_timesteps", 100000)
     lattice_size = current_config["lattice_size"]
+    max_steps = current_config.get("max_steps_per_episode", 1000)
 
     # 1. Initialize Environment
-    logger.info(f"Initializing {num_envs} parallel environments...")
-    env = TensorTiO2Env(num_envs=num_envs, lattice_size=lattice_size, device=device_name)
+    logger.info(f"Initializing {num_envs} parallel environments with max_steps={max_steps}...")
+    env = TensorTiO2Env(
+        num_envs=num_envs,
+        lattice_size=lattice_size,
+        device=device_name,
+        max_steps=max_steps,
+    )
 
     # 2. Initialize Networks
     obs_dim = 75  # 18 neighbors * 3 + 18 rel_z + 2 local + 1 abs_z
