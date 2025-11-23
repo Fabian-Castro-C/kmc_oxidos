@@ -123,11 +123,13 @@ def run_massive_prediction(
     est_vram_gb = (total_sites * (1 + 28)) / 1e9  # 1 byte state + 28 bytes logits (float32)
     logger.info(f"Estimated VRAM usage for tensors: ~{est_vram_gb:.2f} GB")
 
+    # Set max_steps to a huge number (1 billion) to effectively disable auto-reset
+    # This allows running simulations for millions of steps without interruption
     env = TensorTiO2Env(
         num_envs=1,
         lattice_size=(lattice_size_xy, lattice_size_xy, lattice_size_z),
         device=device,
-        max_steps=steps + 10000,  # Prevent auto-reset during simulation
+        max_steps=1_000_000_000,
     )
     # Manually set fluxes (since they are not in __init__)
     # Use very low flux to allow diffusion (similar to training)
