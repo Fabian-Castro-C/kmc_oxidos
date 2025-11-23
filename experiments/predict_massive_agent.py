@@ -319,9 +319,12 @@ def run_massive_prediction(
 
             guided_logits = logits + flat_log_rates
 
-            # Mask Vacant
-            is_occupied = (env.lattices != SpeciesType.VACANT.value).view(-1)
-            guided_logits[~is_occupied] = -1e9
+            # Mask Vacant AND Substrate (Fixed)
+            is_mobile = (env.lattices != SpeciesType.VACANT.value) & (
+                env.lattices != SpeciesType.SUBSTRATE.value
+            )
+            is_mobile = is_mobile.view(-1)
+            guided_logits[~is_mobile] = -1e9
 
             # Hierarchical Sampling
             flat_logits = guided_logits.view(-1)

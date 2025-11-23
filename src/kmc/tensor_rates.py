@@ -108,9 +108,11 @@ class TensorRateCalculator:
         # Rate = nu0 * exp(-Ea / kT)
         rates = self.nu0 * torch.exp(-activation_energies / self.kT)
 
-        # 5. Mask out vacant sites (vacant sites don't diffuse)
-        # We only want rates for actual atoms
-        atom_mask = lattice_state != SpeciesType.VACANT.value
+        # 5. Mask out vacant sites AND substrate (substrate atoms are fixed)
+        # We only want rates for actual mobile atoms (Ti, O)
+        atom_mask = (lattice_state != SpeciesType.VACANT.value) & (
+            lattice_state != SpeciesType.SUBSTRATE.value
+        )
         rates = rates * atom_mask.float()
 
         # Replace NaNs with 0.0 (just in case)
