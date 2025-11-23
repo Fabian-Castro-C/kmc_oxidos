@@ -566,63 +566,205 @@ def run_massive_prediction(
                 end = min(start + block_size, n_total)
                 block_sums[i] = weights[start:end].sum()
 
-            block_idx = torch.multinomial(block_sums, 1).item()
-
-            start = block_idx * block_size
-            end = min(start + block_size, n_total)
-            block_weights = weights[start:end]
-
-            local_idx = torch.multinomial(block_weights, 1).item()
-            global_idx = start + local_idx
-
-            env_action_indices = torch.tensor([global_idx], device=device)
-
-            # Decode index
-            N_A = N_ACTIONS
-            temp = env_action_indices.clone()
+            # --- PARALLEL KMC: Sample Multiple Events ---
+            # We want to sample K events.
+            # Since multinomial without replacement is expensive on massive tensors,
+            # we sample with replacement and then filter duplicates/conflicts.
+            K_SAMPLES = 2048
+            
+            # 1. Sample Blocks
+            # We sample K blocks first
+            block_indices = torch.multinomial(block_sums, K_SAMPLES, replacement=True)
+            
+            # 2. Sample within blocks
+            global_indices = []
+            for b_idx in torch.unique(block_indices):
+                count = (block_indices == b_idx).sum().item()
+                start = b_idx.item() * block_size
+                end = min(start + block_size, n_total)
+                block_w = weights[start:end]
+                
+                local_indices = torch.multinomial(block_w, count, replacement=True)
+                global_indices.append(start + local_indices)
+            
+            all_indices = torch.cat(global_indices)
+            
+            # 3. Decode Indices
+            N_A = 7 # N_ACTIONS (0-6)
+            temp = all_indices.clone()
             a = temp % N_A
             temp //= N_A
             z = temp % Z
             temp //= Z
             y = temp % Y
             x = temp // Y
-
-            agent_actions = torch.stack([x, y, z, a], dim=1)
-
-            env.step(agent_actions)
-            total_moves += 1
-
-            act_type = agent_actions[0, 3].item()
-            if act_type == 6:  # DESORB
-                action_counts["DESORB"] += 1
-            else:
-                action_counts["DIFFUSE"] += 1
-
-            # Update Dirty Indices (Diffusion)
-            src_x, src_y, src_z = x.item(), y.item(), z.item()
-            src_center = torch.tensor([[src_x, src_y, src_z]], device=device)
-            centers_to_update = [src_center]
-
-            if act_type < 6:  # Diffusion
-                dx, dy, dz = env.neighbor_offsets[act_type]
-                dst_x, dst_y, dst_z = (
-                    (src_x + dx) % X,
-                    (src_y + dy) % Y,
-                    (src_z + dz) % Z,
-                )
-                dst_center = torch.tensor([[dst_x, dst_y, dst_z]], device=device)
-                centers_to_update.append(dst_center)
-
-            centers_tensor = torch.cat(centers_to_update, dim=0)
-            new_dirty = get_dirty_indices(env, centers_tensor, dirty_offsets)
-
+            
+            # 4. Conflict Resolution
+            # We need to ensure:
+            # a) No two events use the same Source (x,y,z)
+            # b) No two events use the same Destination (tx, ty, tz)
+            
+            # Calculate Destinations
+            dx = torch.zeros_like(x)
+            dy = torch.zeros_like(y)
+            dz = torch.zeros_like(z)
+            
+            dx = torch.where(a == 0, torch.tensor(1, device=device), dx)
+            dx = torch.where(a == 1, torch.tensor(-1, device=device), dx)
+            dy = torch.where(a == 2, torch.tensor(1, device=device), dy)
+            dy = torch.where(a == 3, torch.tensor(-1, device=device), dy)
+            dz = torch.where(a == 4, torch.tensor(1, device=device), dz)
+            dz = torch.where(a == 5, torch.tensor(-1, device=device), dz)
+            
+            tx = (x + dx) % X
+            ty = (y + dy) % Y
+            tz = z + dz
+            
+            # Create unique IDs for sites
+            # ID = x * Y * Z + y * Z + z
+            src_ids = x * Y * Z + y * Z + z
+            dst_ids = tx * Y * Z + ty * Z + tz
+            
+            # Filter 1: Unique Sources
+            # We prefer events with higher probability? Or just first sampled?
+            # Multinomial already prioritized high prob. First come first serve is fine.
+            # We use torch.unique with return_inverse to find duplicates
+            
+            # Combined check: Source AND Destination must be unique across the batch
+            # We can't have A->B and C->B (collision at B)
+            # We can't have A->B and A->C (same atom moving twice)
+            # We can't have A->B and B->C (daisy chain - risky in parallel, better to avoid)
+            
+            # Strategy:
+            # 1. Concat src_ids and dst_ids
+            # 2. Find unique values. If any value appears more than once, we have a conflict.
+            # This is too strict (A->B and C->D is fine, but A->B and B->A is not).
+            # Daisy chain A->B and B->C: B is dst for 1 and src for 2.
+            
+            # Robust Strategy:
+            # Keep a mask of "locked" sites. Iterate through sampled events.
+            # If src or dst is locked, discard. Else, lock src and dst and keep.
+            # This is iterative (slow in Python).
+            
+            # Vectorized Strategy:
+            # 1. Sort by weight (optional, but good)
+            # 2. Use `unique_consecutive` or similar?
+            # Let's try a greedy approach using `unique` on Sources first, then Destinations.
+            
+            # Step A: Unique Sources
+            u_src, idx_src = torch.unique(src_ids, return_inverse=True)
+            # We want to keep one event per unique source.
+            # unique returns sorted unique elements.
+            # We need to select indices.
+            # Let's just take the first occurrence of each unique source.
+            # scatter_reduce is useful here but maybe overkill.
+            
+            # Simple:
+            # Create a random permutation to shuffle priority? No, keep multinomial order.
+            # Actually, `unique` sorts the values, losing order.
+            
+            # Let's use a simple heuristic:
+            # Just take the first K non-conflicting.
+            # Since K is small (2048) vs N (millions), conflicts are rare unless high density.
+            
+            # Filter: Unique Sources
+            # We can use a trick:
+            # 1. Stack (src, dst)
+            # 2. Check for duplicates in the whole set of involved sites.
+            
+            # Let's do it simply:
+            # 1. Filter duplicates in Src
+            # 2. Filter duplicates in Dst
+            # 3. Filter if Src in Dst (Daisy chain)
+            
+            # 1. Unique Sources
+            # We use a mask.
+            # Find indices of unique elements.
+            # torch.unique doesn't return indices of first occurrence directly in older versions,
+            # but we can do:
+            _, uniq_idx = np.unique(src_ids.cpu().numpy(), return_index=True)
+            # GPU version of unique with indices is available in newer torch.
+            # Let's assume we can use CPU for this small batch (2048 is tiny).
+            
+            src_cpu = src_ids.cpu().numpy()
+            dst_cpu = dst_ids.cpu().numpy()
+            
+            # Greedy conflict resolution in CPU (fast enough for 2000 items)
+            keep_indices = []
+            locked_sites = set()
+            
+            for i in range(len(src_cpu)):
+                s = src_cpu[i]
+                d = dst_cpu[i]
+                
+                if s in locked_sites or d in locked_sites:
+                    continue
+                
+                locked_sites.add(s)
+                locked_sites.add(d)
+                keep_indices.append(i)
+            
+            keep_indices = torch.tensor(keep_indices, device=device)
+            
+            # Select valid events
+            valid_x = x[keep_indices]
+            valid_y = y[keep_indices]
+            valid_z = z[keep_indices]
+            valid_a = a[keep_indices]
+            
+            # Construct Batch Action Tensor
+            # (N, 5) -> [batch_idx, x, y, z, a]
+            # batch_idx is 0
+            batch_col = torch.zeros_like(valid_x)
+            
+            agent_actions = torch.stack([batch_col, valid_x, valid_y, valid_z, valid_a], dim=1)
+            
+            # Execute Batch
+            env.step_events(agent_actions)
+            
+            n_events = len(keep_indices)
+            total_moves += n_events
+            
+            # Update dirty indices for ALL events
+            # We need to update dirty indices for every src and dst
+            # This is important for the cache.
+            
+            # Src centers
+            src_centers = torch.stack([valid_x, valid_y, valid_z], dim=1)
+            # Dst centers
+            # We need to recalculate dst because we only have valid_x...
+            # Or just use the pre-calculated tx, ty, tz
+            valid_tx = tx[keep_indices]
+            valid_ty = ty[keep_indices]
+            valid_tz = tz[keep_indices]
+            dst_centers = torch.stack([valid_tx, valid_ty, valid_tz], dim=1)
+            
+            all_centers = torch.cat([src_centers, dst_centers], dim=0)
+            
+            # Get dirty for all
+            # get_dirty_indices expects (N, 3)
+            # We can process in batch
+            new_dirty = get_dirty_indices(env, all_centers, dirty_offsets)
+            
             if dirty_indices is None:
                 dirty_indices = new_dirty
             else:
                 dirty_indices = torch.cat([dirty_indices, new_dirty])
+                # Unique is expensive on large tensors, but dirty_indices shouldn't be too huge
+                # if we do it every step.
+                # Optimization: Maybe only unique every N steps?
+                # For now, keep it safe.
                 dirty_indices = torch.unique(dirty_indices, dim=0)
 
-            # logger.info(f"Step {step}: Agent moved")
+            # Update counters
+            # We don't distinguish desorb/diffuse in logs easily now, but we can count
+            n_desorb = (valid_a == 6).sum().item()
+            n_diff = n_events - n_desorb
+            
+            action_counts["DESORB"] += n_desorb
+            action_counts["DIFFUSE"] += n_diff
+
+
 
         # 6. Snapshot & Metrics
         # Log every 100 steps OR on snapshot OR on interrupt/finish

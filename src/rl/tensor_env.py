@@ -422,3 +422,118 @@ class TensorTiO2Env:
 
         # Return rewards for the affected envs
         return rewards[env_indices]
+
+    def step_events(self, actions):
+        """
+        Execute MULTIPLE actions on the SAME environment (Parallel KMC).
+        ASSUMPTION: The actions are already filtered and non-conflicting.
+        
+        Args:
+            actions: (N_Events, 4) tensor of [batch_idx, x, y, z, action_enum]
+                     Note: batch_idx should be 0 for single simulation.
+        """
+        if actions.shape[0] == 0:
+            return
+
+        # Extract components
+        # actions: (N, 4)
+        # We assume batch_idx is always 0 for now (single massive env)
+        b_idx = actions[:, 0].long()
+        x = actions[:, 1].long()
+        y = actions[:, 2].long()
+        z = actions[:, 3].long()
+        a = actions[:, 4].long() # Wait, input is (N, 4) or (N, 5)?
+        # step() uses (B, 4) -> x, y, z, action. But we need batch index?
+        # The standard step() assumes 1 action per env, so batch_idx is implicit (range(B)).
+        # Here we have multiple actions for env 0.
+        # Let's assume input is (N, 5): [b, x, y, z, a]
+        # Or just (N, 4): [x, y, z, a] and we assume env 0?
+        # Let's stick to the standard format used in step():
+        # step() takes (B, 4) -> [x, y, z, a].
+        # So here we take (N, 4) -> [x, y, z, a] and assume they apply to env 0 (or mixed, but we use advanced indexing).
+        
+        # Actually, let's use (N, 5) to be safe if we ever want multi-env parallel.
+        # But for now, let's assume the caller passes [x, y, z, a] and we apply to env defined by self.lattices[0]...
+        # Wait, `step` uses `actions[:, 0]` as X.
+        # Let's define `step_events` to take `(N, 5)`: [b, x, y, z, a]
+        
+        b = actions[:, 0]
+        x = actions[:, 1]
+        y = actions[:, 2]
+        z = actions[:, 3]
+        a = actions[:, 4]
+
+        # Define neighbor offsets
+        dx = torch.zeros_like(x)
+        dy = torch.zeros_like(y)
+        dz = torch.zeros_like(z)
+
+        # Map action to delta
+        dx = torch.where(a == 0, torch.tensor(1, device=self.device), dx)
+        dx = torch.where(a == 1, torch.tensor(-1, device=self.device), dx)
+        dy = torch.where(a == 2, torch.tensor(1, device=self.device), dy)
+        dy = torch.where(a == 3, torch.tensor(-1, device=self.device), dy)
+        dz = torch.where(a == 4, torch.tensor(1, device=self.device), dz)
+        dz = torch.where(a == 5, torch.tensor(-1, device=self.device), dz)
+
+        # Target coordinates
+        tx = (x + dx) % self.nx
+        ty = (y + dy) % self.ny
+        tz = z + dz
+
+        # Check bounds for Z
+        valid_z = (tz >= 0) & (tz < self.nz)
+        
+        # Filter valid moves
+        is_diff = a < 6
+        mask_move = is_diff & valid_z
+        
+        if mask_move.any():
+            # Apply mask
+            mb = b[mask_move]
+            mx, my, mz = x[mask_move], y[mask_move], z[mask_move]
+            mtx, mty, mtz = tx[mask_move], ty[mask_move], tz[mask_move]
+            
+            # Get values
+            # We use advanced indexing
+            src_val = self.lattices[mb, mx, my, mz]
+            dst_val = self.lattices[mb, mtx, mty, mtz]
+            
+            # Check vacancy (Double check, though caller should have filtered)
+            is_vacant = dst_val == SpeciesType.VACANT.value
+            
+            if is_vacant.any():
+                mb = mb[is_vacant]
+                mx, my, mz = mx[is_vacant], my[is_vacant], mz[is_vacant]
+                mtx, mty, mtz = mtx[is_vacant], mty[is_vacant], mtz[is_vacant]
+                src_val = src_val[is_vacant]
+                dst_val = dst_val[is_vacant]
+                
+                # Execute Swaps
+                # We can do this in parallel because we assume no conflicts
+                self.lattices.index_put_((mb, mx, my, mz), dst_val)
+                self.lattices.index_put_((mb, mtx, mty, mtz), src_val)
+                
+                # Move Atom IDs
+                src_id = self.atom_ids[mb, mx, my, mz]
+                dst_id = self.atom_ids[mb, mtx, mty, mtz]
+                
+                self.atom_ids.index_put_((mb, mx, my, mz), dst_id)
+                self.atom_ids.index_put_((mb, mtx, mty, mtz), src_id)
+
+        # Desorption
+        mask_desorb = a == 6
+        if mask_desorb.any():
+            db = b[mask_desorb]
+            dx, dy, dz = x[mask_desorb], y[mask_desorb], z[mask_desorb]
+            
+            self.lattices.index_put_((db, dx, dy, dz), torch.tensor(SpeciesType.VACANT.value, device=self.device, dtype=torch.int8))
+            self.atom_ids.index_put_((db, dx, dy, dz), torch.tensor(0, device=self.device, dtype=torch.long))
+
+        # Update steps (add N events to the counter? Or just 1 step?)
+        # Physically, time advances by dt = -ln(u) / R_total
+        # If we execute K events, we advance time by roughly K * dt_avg?
+        # For now, let's just increment steps by 1 (simulation step) or by N (events)?
+        # The user cares about "Steps" as "KMC Steps".
+        # If we do parallel, 1 loop iteration = K KMC steps.
+        self.steps += actions.shape[0]
