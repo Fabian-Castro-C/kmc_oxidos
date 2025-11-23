@@ -71,7 +71,7 @@ class TiO2Parameters:
     ea_diff_o: float = 0.4  # eV (typically higher than Ti)
 
     # Ehrlich-Schwoebel barrier (additional barrier for descending step edges)
-    ea_es: float = 0.15  # eV (typical range: 0.1-0.2 eV, ~20-25% of ea_diff)
+    ea_es: float = 0.4  # eV (typical range: 0.1-0.2 eV, ~20-25% of ea_diff)
 
     # Desorption barriers
     # Higher than diffusion, strongly coordination-dependent
