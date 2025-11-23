@@ -187,6 +187,9 @@ def run_massive_prediction(
     # Action tracking
     action_counts = {"DEPOSIT_TI": 0, "DEPOSIT_O": 0, "DIFFUSE": 0, "DESORB": 0}
 
+    # Accumulator for deposition (from train_gpu_swarm.py)
+    deposition_acc = 0.0
+
     # Initial snapshot
     # np.save(snapshots_dir / "lattice_000000.npy", env.lattices.cpu().numpy())
 
@@ -204,17 +207,34 @@ def run_massive_prediction(
         R_dep_o = env.flux_o * n_sites
         R_dep_total = R_dep_ti + R_dep_o
 
-        R_total = R_dep_total + total_diff_rate
-
         # KMC Selection: Deposition vs Diffusion
+        # Use the same logic as train_gpu_swarm.py
+        # R_diff_total is the sum of all diffusion rates in the lattice
+        # Multiply by 6.0 as an approximate upper bound for total possible moves (isotropic assumption)
+        R_diff_total = total_diff_rate * 6.0
+
+        R_total = R_dep_total + R_diff_total
         p_dep = R_dep_total / (R_total + 1e-10)
+
+        # --- VISUALIZATION FIX: Minimum Deposition Probability ---
+        # Ensure at least 5% of events are depositions to guarantee growth visualization
+        # Otherwise we just watch diffusion for millions of steps
+        # This matches the logic in train_gpu_swarm.py: p_dep = torch.clamp(p_dep, min=0.05)
+        p_dep = max(p_dep, 0.05)
 
         if step % 100 == 0:
             logger.info(
-                f"Rates - Dep: {R_dep_total:.2e}, Diff: {total_diff_rate:.2e}, p_dep: {p_dep:.4f}"
+                f"Rates - Dep: {R_dep_total:.2e}, Diff: {total_diff_rate:.2e}, p_dep: {p_dep:.4f}, Acc: {deposition_acc:.2f}"
             )
 
-        if torch.rand(1, device=device) < p_dep:
+        # Update accumulator
+        deposition_acc += p_dep
+        should_deposit = deposition_acc >= 1.0
+
+        if should_deposit:
+            # Decrement accumulator
+            deposition_acc -= 1.0
+
             # --- DEPOSITION EVENT ---
             is_ti = torch.rand(1, device=device) < (R_dep_ti / R_dep_total)
 
