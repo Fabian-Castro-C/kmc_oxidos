@@ -210,6 +210,9 @@ def run_massive_prediction(
     cached_logits = None
     dirty_indices = None
     cached_base_rates = None
+    cached_weights = None
+    cached_block_sums = None
+    block_size = 10_000_000
 
     # PRE-ALLOCATE CONSTANTS FOR OPTIMIZATION
     # 1. Offsets for get_dirty_indices
@@ -262,7 +265,7 @@ def run_massive_prediction(
         # This matches the logic in train_gpu_swarm.py: p_dep = torch.clamp(p_dep, min=0.05)
         p_dep = max(p_dep, 0.10)
 
-        if step % 1000 == 0:
+        if step % 10000 == 0:
             logger.info(
                 f"Rates - Dep: {R_dep_total:.2e}, Diff: {total_diff_rate:.2e}, p_dep: {p_dep:.4f}, Acc: {deposition_acc:.2f}"
             )
@@ -413,61 +416,105 @@ def run_massive_prediction(
                 dirty_indices = None  # Reset
 
             # Use cached logits
-            logits = cached_logits.view(-1, 7)
+            # logits = cached_logits.view(-1, 7) # REMOVED: We don't need full logits tensor anymore
 
-            # Physics masking/reweighting
-            # We need to separate Diffusion rates from Desorption rates
-            # Action 0-5: Diffusion (use base_rates)
-            # Action 6: Desorption (use much lower rate)
-            
-            # Calculate Desorption Rate
-            # E_des ~ 2.0 eV vs E_diff ~ 0.6 eV -> Delta ~ 1.4 eV
-            # Rate_des = Rate_diff * exp(-DeltaE / kT)
-            # log(Rate_des) = log(Rate_diff) - DeltaE/kT
-            # DeltaE/kT ~ 1.4 / 0.052 ~ 27.0
-            # We'll subtract a large penalty from the desorption logit
-            
-            flat_base_rates = base_rates.view(-1, 1)
-            flat_log_rates = torch.log(flat_base_rates + 1e-10)
-            
-            # Create a (N, 7) tensor of log rates
-            # Start with diffusion rates for all
-            all_log_rates = flat_log_rates.expand(-1, 7).clone()
-            
-            # Apply penalty to Desorption (Index 6)
-            # This effectively disables desorption unless the agent has a massive preference
-            # which it shouldn't.
-            all_log_rates[:, 6] -= 30.0 
+            # --- OPTIMIZED SAMPLING (Incremental Update) ---
+            if cached_weights is None:
+                # First Run: Calculate Full Weights
+                # We need to construct the full guided_logits once
+                flat_logits = cached_logits.view(-1, 7)
+                flat_base_rates = base_rates.view(-1, 1)
+                flat_log_rates = torch.log(flat_base_rates + 1e-10)
+                all_log_rates = flat_log_rates.expand(-1, 7).clone()
+                all_log_rates[:, 6] -= 30.0
+                
+                guided_logits = flat_logits + all_log_rates
+                
+                # Mask Vacant/Substrate
+                is_mobile = (env.lattices != SpeciesType.VACANT.value) & (
+                    env.lattices != SpeciesType.SUBSTRATE.value
+                )
+                is_mobile = is_mobile.view(-1)
+                guided_logits[~is_mobile] = -1e9
+                
+                flat_guided = guided_logits.view(-1)
+                cached_weights = torch.exp(flat_guided)
+                
+                # Block Sums
+                n_total = cached_weights.numel()
+                num_blocks = (n_total + block_size - 1) // block_size
+                cached_block_sums = torch.zeros(num_blocks, device=device)
+                for i in range(num_blocks):
+                    start = i * block_size
+                    end = min(start + block_size, n_total)
+                    cached_block_sums[i] = cached_weights[start:end].sum()
+                    
+            elif dirty_indices is not None and len(dirty_indices) > 0:
+                # Incremental Update of Weights
+                # 1. Get new logits and rates for dirty indices
+                # cached_logits and base_rates are already updated at dirty_indices
+                
+                # Extract values
+                # dirty_indices: (N, 3)
+                # We need flat indices for weights: (x*Y*Z + y*Z + z)*7 + action
+                
+                # Get logits: (N, 7)
+                new_logits = cached_logits[dirty_indices[:, 0], dirty_indices[:, 1], dirty_indices[:, 2]]
+                
+                # Get rates: (N,)
+                new_rates = base_rates[0, dirty_indices[:, 0], dirty_indices[:, 1], dirty_indices[:, 2]]
+                
+                # Calculate new weights
+                # weight = exp(logit) * rate * penalty
+                # log(weight) = logit + log(rate) + penalty
+                
+                log_rates = torch.log(new_rates.unsqueeze(1) + 1e-10).expand(-1, 7).clone()
+                log_rates[:, 6] -= 30.0
+                
+                new_guided = new_logits + log_rates
+                
+                # Masking
+                # We need to check if these sites are mobile
+                # env.lattices is updated
+                species = env.lattices[0, dirty_indices[:, 0], dirty_indices[:, 1], dirty_indices[:, 2]]
+                is_mobile_subset = (species != SpeciesType.VACANT.value) & (species != SpeciesType.SUBSTRATE.value)
+                
+                new_guided[~is_mobile_subset] = -1e9
+                new_weights_subset = torch.exp(new_guided) # (N, 7)
+                
+                # Update cached_weights and block_sums
+                # This is the tricky part: scatter update
+                
+                # Calculate flat indices for the 7 actions of each dirty site
+                # Base index for each site
+                base_indices = (dirty_indices[:, 0] * Y * Z + dirty_indices[:, 1] * Z + dirty_indices[:, 2]) * 7
+                
+                # We have N sites, 7 actions. Total 7N updates.
+                # Flatten everything
+                flat_indices_to_update = (base_indices.unsqueeze(1) + torch.arange(7, device=device).unsqueeze(0)).view(-1)
+                flat_new_weights = new_weights_subset.view(-1)
+                
+                # Get old weights to update block sums
+                old_weights = cached_weights[flat_indices_to_update]
+                diff = flat_new_weights - old_weights
+                
+                # Update weights
+                cached_weights[flat_indices_to_update] = flat_new_weights
+                
+                # Update block sums
+                # Map flat indices to block indices
+                block_indices_to_update = flat_indices_to_update // block_size
+                
+                # We need to sum diffs by block index
+                # scatter_add_ is useful here
+                cached_block_sums.scatter_add_(0, block_indices_to_update, diff)
 
-            guided_logits = logits + all_log_rates
-
-            # Mask Vacant AND Substrate (Fixed)
-            is_mobile = (env.lattices != SpeciesType.VACANT.value) & (
-                env.lattices != SpeciesType.SUBSTRATE.value
-            )
-            is_mobile = is_mobile.view(-1)
-            guided_logits[~is_mobile] = -1e9
-
-            # Hierarchical Sampling
-            flat_logits = guided_logits.view(-1)
-            n_total = flat_logits.numel()
-            block_size = 10_000_000
-            max_logit = flat_logits.max()
-            weights = torch.exp(flat_logits - max_logit)
-
-            num_blocks = (n_total + block_size - 1) // block_size
-            block_sums = torch.zeros(num_blocks, device=device)
-
-            for i in range(num_blocks):
-                start = i * block_size
-                end = min(start + block_size, n_total)
-                block_sums[i] = weights[start:end].sum()
-
-            block_idx = torch.multinomial(block_sums, 1).item()
+            # Sampling from cached structures
+            block_idx = torch.multinomial(cached_block_sums, 1).item()
 
             start = block_idx * block_size
-            end = min(start + block_size, n_total)
-            block_weights = weights[start:end]
+            end = min(start + block_size, cached_weights.numel())
+            block_weights = cached_weights[start:end]
 
             local_idx = torch.multinomial(block_weights, 1).item()
             global_idx = start + local_idx
