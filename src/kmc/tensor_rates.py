@@ -91,10 +91,10 @@ class TensorRateCalculator:
 
         # Use a coordination-dependent scaling factor (Soft Barrier)
         # Ea = E_base * (1 + 3.0 * (N / 6))
-        # We increase the scaling factor to 3.0 to promote island formation (Volmer-Weber).
-        # Stronger binding = atoms stick to neighbors = less flattening.
+        # We reduce the scaling factor to 0.5 to allow relaxation (avoid pillars).
+        # Ea = E_base * (1 + 0.5 * (N / 6))
         coordination_factor = coordination_map / 6.0
-        activation_energies = base_energies * (1.0 + 3.0 * coordination_factor)
+        activation_energies = base_energies * (1.0 + 1.5 * coordination_factor)
 
         # 4. Calculate Rates (Arrhenius)
         # Rate = nu0 * exp(-Ea / kT)
