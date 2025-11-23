@@ -417,9 +417,9 @@ def train_gpu_swarm():
             # Log for first env
             num_steps = current_config["num_steps"]
             should_log_step = (
-                step < 30
-                or (step >= num_steps // 2 and step < num_steps // 2 + 30)
-                or step >= num_steps - 30
+                step < 10
+                or (step >= num_steps // 2 and step < num_steps // 2 + 10)
+                or step >= num_steps - 10
             )
             if should_log_step and log_action_type is not None:
                 # Count agents (non-vacant, non-substrate)
@@ -457,14 +457,14 @@ def train_gpu_swarm():
         for log in detailed_log_steps:
             step = log["step"]
 
-            if step < 30 and not printed_first:
-                logger.info("--- First 30 Steps ---")
+            if step < 10 and not printed_first:
+                logger.info("--- First 10 Steps ---")
                 printed_first = True
-            elif step >= num_steps // 2 and step < num_steps // 2 + 30 and not printed_middle:
-                logger.info("--- Middle 30 Steps ---")
+            elif step >= num_steps // 2 and step < num_steps // 2 + 10 and not printed_middle:
+                logger.info("--- Middle 10 Steps ---")
                 printed_middle = True
-            elif step >= num_steps - 30 and not printed_last:
-                logger.info("--- Last 30 Steps ---")
+            elif step >= num_steps - 10 and not printed_last:
+                logger.info("--- Last 10 Steps ---")
                 printed_last = True
             # Format similar to train_scalable_agent.py
             # [  0] DEPOSIT Ti → Reward: +2.000, Agents: 3
