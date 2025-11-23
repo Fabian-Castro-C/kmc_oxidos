@@ -126,7 +126,7 @@ PPO_CONFIG = {
     # INCREASED MINIBATCH: With 1024 envs, 256 was too small (1000+ iters).
     # 4096 * 1000 sites = ~4M agents per batch. Fits in A100/4090.
     # Reduces CPU overhead significantly.
-    "minibatch_size": 4096,
+    "minibatch_size": 2048,
 }
 
 # ============================================================================
