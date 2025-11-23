@@ -159,21 +159,6 @@ class TensorTiO2Env:
         # Channels: 1=Ti, 2=O, 3=Substrate
         ti = one_hot[:, 1:2]
         o = one_hot[:, 2:3]
-        sub = one_hot[:, 3:4]
-
-        # Neighbor kernel (sum of 6 neighbors)
-        k = self.physics.kernel_coordination  # (1, 1, 3, 3, 3)
-
-        # Convolve to find neighbors
-        # Padding=1 handles boundaries (open)
-        ti_neighbors = torch.nn.functional.conv3d(ti, k, padding=1)
-        o_neighbors = torch.nn.functional.conv3d(o, k, padding=1)
-        sub_neighbors = torch.nn.functional.conv3d(sub, k, padding=1)
-
-        # Calculate Bond Energies
-        # Ti-Ti: Sum(Ti * Ti_neighbors) / 2
-        e_ti_ti = (ti * ti_neighbors).sum(dim=(1, 2, 3, 4)) * 0.5 * self.params.bond_energy_ti_ti
-
         # O-O: Sum(O * O_neighbors) / 2
         e_o_o = (o * o_neighbors).sum(dim=(1, 2, 3, 4)) * 0.5 * self.params.bond_energy_o_o
 
