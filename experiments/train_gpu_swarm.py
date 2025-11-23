@@ -313,6 +313,12 @@ def train_gpu_swarm():
             # Create "final" rewards tensor
             step_rewards = torch.zeros(B, device=device)
 
+            # Capture Agent ID for logging (Env 0) BEFORE step moves it
+            log_agent_id = -1
+            if not should_deposit[0]:
+                lx, ly, lz = agent_actions[0, 0], agent_actions[0, 1], agent_actions[0, 2]
+                log_agent_id = env.atom_ids[0, lx, ly, lz].item()
+
             # Execute Agent Step (for ALL, but we'll ignore/overwrite for depositing)
             next_obs, rewards, dones, _ = env.step(agent_actions)
             step_rewards += rewards
@@ -323,13 +329,10 @@ def train_gpu_swarm():
                 act_idx = agent_actions[0, 3].item()
                 # Action mapping from tensor_env.py: 0:X+, 1:X-, 2:Y+, 3:Y-, 4:Z+, 5:Z-, 6:DESORB
                 act_names = ["X+", "X-", "Y+", "Y-", "Z+", "Z-", "DESORB"]
-                if act_idx < len(act_names):
-                    act_name = act_names[act_idx]
-                else:
-                    act_name = f"UNKNOWN({act_idx})"
+                act_name = act_names[act_idx] if act_idx < len(act_names) else f"UNKNOWN({act_idx})"
                 
                 detailed_log_steps.append(
-                    f"Step {step}: Agent at ({agent_actions[0,0]}, {agent_actions[0,1]}, {agent_actions[0,2]}) moved {act_name}"
+                    f"Step {step}: Agent {log_agent_id} at ({agent_actions[0,0]}, {agent_actions[0,1]}, {agent_actions[0,2]}) moved {act_name}"
                 )
 
             # Execute Deposition (Overwrite)
