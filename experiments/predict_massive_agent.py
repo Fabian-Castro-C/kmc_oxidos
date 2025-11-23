@@ -139,10 +139,10 @@ def run_massive_prediction(
     # Training used 600K. Let's try 1000K to see if diffusion activates.
     # Rate = v0 * exp(-Ea / kT)
     # Higher T -> Higher Rate
-    env.physics.kT = env.params.k_boltzmann * 1000.0
+    env.physics.kT = env.params.k_boltzmann * 600.0
 
     # Debug logging for rates
-    logger.info(f"Flux Ti: {env.flux_ti}, Flux O: {env.flux_o}, T: 1000K")
+    logger.info(f"Flux Ti: {env.flux_ti}, Flux O: {env.flux_o}, T: 600K")
 
     # --- Load Agent ---
     logger.info(f"Loading model from {model_path}...")
