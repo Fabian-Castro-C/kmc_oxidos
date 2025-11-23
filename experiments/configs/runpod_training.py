@@ -123,7 +123,7 @@ PPO_CONFIG = {
     # Optimization
     "adam_eps": 1e-5,  # Adam epsilon for numerical stability
     "update_epochs": 4,  # Number of epochs per PPO update (optimized for large batch size)
-    "minibatch_size": 64,  # Small minibatch to fit Swarm agents in VRAM (64 * 8000 = 512k agents)
+    "minibatch_size": 128,  # Increased minibatch size for faster updates (128 * 8000 = 1M agents)
 }
 
 # ============================================================================
@@ -134,10 +134,9 @@ TRAINING_CONFIG = {
     "total_timesteps": 100_000_000,  # 100M steps for deep convergence on RTX 5090
     # Rollout collection
     "num_steps": 256,  # Short rollouts for frequent updates
-    "num_envs": 256,  # Reduced to 256 to fit in VRAM (Batch = 256 * 256 = 65k)
+    "num_envs": 128,  # Reduced to 128 to allow larger minibatch and faster updates
     # Note: Swarm architecture processes EVERY atom as an agent.
-    # 256 envs * 8000 sites = 2,048,000 agents per forward pass.
-    # This consumes ~5-6GB VRAM for activations.
+    # 128 envs * 8000 sites = 1,024,000 agents per forward pass.
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"

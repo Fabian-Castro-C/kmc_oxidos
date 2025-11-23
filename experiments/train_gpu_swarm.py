@@ -180,6 +180,7 @@ def train_gpu_swarm():
 
     start_time = time.time()
     global_step = 0
+    best_reward = -float("inf")  # Track best reward
 
     # Deposition Accumulators (per environment)
     deposition_acc = torch.zeros(num_envs, device=device)
@@ -612,6 +613,20 @@ def train_gpu_swarm():
                 {"actor": actor.state_dict(), "critic": critic.state_dict(), "update": update},
                 f"experiments/results/train/{run_name}/checkpoint_{update}.pt",
             )
+
+        # Save Best Model
+        if mean_reward > best_reward:
+            best_reward = mean_reward
+            torch.save(
+                {
+                    "actor": actor.state_dict(),
+                    "critic": critic.state_dict(),
+                    "update": update,
+                    "reward": best_reward,
+                },
+                f"experiments/results/train/{run_name}/best_model.pt",
+            )
+            logger.info(f"  New best model saved with reward: {best_reward:.4f}")
 
     writer.close()
 
