@@ -462,9 +462,9 @@ def run_massive_prediction(
             export_to_gsf(
                 height_profile=h_np,
                 output_path=gsf_path,
-                lattice_constant=env.params.lattice_constant,
+                lattice_constant=env.params.lattice_constant_a,
                 step=step,
-                roughness=rms * env.params.lattice_constant,  # Convert to Angstrom
+                roughness=rms * env.params.lattice_constant_a,  # Convert to Angstrom
                 coverage=coverage,
             )
 
