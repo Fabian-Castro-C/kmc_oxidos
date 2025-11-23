@@ -313,27 +313,28 @@ def train_gpu_swarm():
             # Create "final" rewards tensor
             step_rewards = torch.zeros(B, device=device)
 
+            # Track action type for logging (0=Agent, 1=Deposition)
+            # For the first env, we want to know exactly what happened
+            log_action_type = None
+            log_details = None
+
             # Capture Agent ID for logging (Env 0) BEFORE step moves it
-            log_agent_id = -1
             if not should_deposit[0]:
                 lx, ly, lz = agent_actions[0, 0], agent_actions[0, 1], agent_actions[0, 2]
                 log_agent_id = env.atom_ids[0, lx, ly, lz].item()
-
-            # Execute Agent Step (for ALL, but we'll ignore/overwrite for depositing)
-            next_obs, rewards, dones, _ = env.step(agent_actions)
-            step_rewards += rewards
-            n_agent_actions += (~should_deposit).sum().item()
-
-            # Log Agent Action (Env 0 only)
-            if not should_deposit[0]:
+                
                 act_idx = agent_actions[0, 3].item()
                 # Action mapping from tensor_env.py: 0:X+, 1:X-, 2:Y+, 3:Y-, 4:Z+, 5:Z-, 6:DESORB
                 act_names = ["X+", "X-", "Y+", "Y-", "Z+", "Z-", "DESORB"]
                 act_name = act_names[act_idx] if act_idx < len(act_names) else f"UNKNOWN({act_idx})"
                 
-                detailed_log_steps.append(
-                    f"Step {step}: Agent {log_agent_id} at ({agent_actions[0,0]}, {agent_actions[0,1]}, {agent_actions[0,2]}) moved {act_name}"
-                )
+                log_action_type = "Agent Action"
+                log_details = f"Agent #{log_agent_id} at ({lx},{ly},{lz}) -> {act_name}"
+
+            # Execute Agent Step (for ALL, but we'll ignore/overwrite for depositing)
+            next_obs, rewards, dones, _ = env.step(agent_actions)
+            step_rewards += rewards
+            n_agent_actions += (~should_deposit).sum().item()
 
             # Execute Deposition (Overwrite)
             if should_deposit.any():
@@ -380,23 +381,27 @@ def train_gpu_swarm():
                         r_ti = env.deposit(ti_idx, SpeciesType.TI, ti_coords)
                         # step_rewards[ti_idx] = r_ti  # DISABLED: User requested training only on agent actions
 
-                        # Log Deposition (Env 0 only)
-                        if 0 in ti_idx:
-                            idx_in_batch = (ti_idx == 0).nonzero(as_tuple=True)[0].item()
-                            coords = ti_coords[idx_in_batch]
-                            detailed_log_steps.append(f"Step {step}: DEPOSITION Ti at ({coords[0]}, {coords[1]}, {coords[2]})")
-
                     if (~is_ti).any():
                         o_idx = dep_indices[~is_ti]
                         o_coords = dep_coords[~is_ti]
                         r_o = env.deposit(o_idx, SpeciesType.O, o_coords)
                         # step_rewards[o_idx] = r_o  # DISABLED: User requested training only on agent actions
 
-                        # Log Deposition (Env 0 only)
-                        if 0 in o_idx:
-                            idx_in_batch = (o_idx == 0).nonzero(as_tuple=True)[0].item()
-                            coords = o_coords[idx_in_batch]
-                            detailed_log_steps.append(f"Step {step}: DEPOSITION O at ({coords[0]}, {coords[1]}, {coords[2]})")
+                    # Check if first env was a deposition
+                    if should_deposit[0]:
+                        # Was it Ti or O?
+                        # We need to check the specific choice for index 0
+                        # Re-find the index in dep_indices (which is now filtered by valid_dep)
+                        idx_in_dep = (dep_indices == 0).nonzero()
+                        if len(idx_in_dep) > 0:
+                            idx = idx_in_dep.item()
+                            is_ti_0 = is_ti[idx]
+                            species = "Ti" if is_ti_0 else "O"
+                            # Get the ID of the newly deposited atom
+                            new_id = env.atom_ids[0, dep_x[idx], dep_y[idx], dep_z[idx]].item()
+                            
+                            log_action_type = "Deposition"
+                            log_details = f"Deposit {species} #{new_id} at ({dep_x[idx]},{dep_y[idx]},{dep_z[idx]})"
 
             # Store data
             batch_actions.append(env_action_indices)
@@ -409,28 +414,77 @@ def train_gpu_swarm():
             obs = next_obs
             ep_rewards.append(step_rewards.mean().item())
 
-        # Print detailed steps for Env 0 (Sampled: First 30, Middle 30, Last 30)
-        logger.info(f"Detailed Steps (Env 0) - Total Steps: {len(detailed_log_steps)}")
-        if len(detailed_log_steps) <= 90:
-            for msg in detailed_log_steps:
-                logger.info("  " + msg)
-        else:
-            # First 30
-            for msg in detailed_log_steps[:30]:
-                logger.info("  " + msg)
-            
-            logger.info("  ... (skipping intermediate steps) ...")
-            
-            # Middle 30
-            mid = len(detailed_log_steps) // 2
-            for msg in detailed_log_steps[mid-15:mid+15]:
-                logger.info("  " + msg)
-                
-            logger.info("  ... (skipping intermediate steps) ...")
+            # Log for first env
+            num_steps = current_config["num_steps"]
+            should_log_step = (
+                step < 30
+                or (step >= num_steps // 2 and step < num_steps // 2 + 30)
+                or step >= num_steps - 30
+            )
+            if should_log_step and log_action_type is not None:
+                # Count agents (non-vacant, non-substrate)
+                # env.lattices is (B, X, Y, Z)
+                # We only care about env 0
+                lat0 = env.lattices[0]
+                n_agents = (
+                    ((lat0 != SpeciesType.VACANT.value) & (lat0 != SpeciesType.SUBSTRATE.value))
+                    .sum()
+                    .item()
+                )
 
-            # Last 30
-            for msg in detailed_log_steps[-30:]:
-                logger.info("  " + msg)
+                detailed_log_steps.append(
+                    {
+                        "step": step,
+                        "type": log_action_type,
+                        "details": log_details,
+                        "reward": step_rewards[0].item(),
+                        "n_agents": n_agents,
+                        "env_steps": env.steps[0].item(),
+                        "env_max_steps": env.max_steps,
+                        "done": dones[0].item(),
+                    }
+                )
+
+        # Detailed Step Logging
+        logger.info("--- Detailed Steps (Env 0) ---")
+
+        printed_first = False
+        printed_middle = False
+        printed_last = False
+
+        num_steps = current_config["num_steps"]
+
+        for log in detailed_log_steps:
+            step = log["step"]
+
+            if step < 30 and not printed_first:
+                logger.info("--- First 30 Steps ---")
+                printed_first = True
+            elif step >= num_steps // 2 and step < num_steps // 2 + 30 and not printed_middle:
+                logger.info("--- Middle 30 Steps ---")
+                printed_middle = True
+            elif step >= num_steps - 30 and not printed_last:
+                logger.info("--- Last 30 Steps ---")
+                printed_last = True
+            # Format similar to train_scalable_agent.py
+            # [  0] DEPOSIT Ti → Reward: +2.000, Agents: 3
+            # [  0] AGENT[ 0] DIFFUSE_Y_POS → Reward: +0.000, Agents: 3
+
+            if log["type"] == "Deposition":
+                # Parse details "Deposit Ti at (x,y,z)"
+                parts = log["details"].split()
+                species = parts[1]
+                logger.info(
+                    f"  [{log['step']:3d}] DEPOSIT {species:<2}            → Reward: {log['reward']:+6.3f}, Agents: {log['n_agents']:3d}, Steps: {log['env_steps']}/{log['env_max_steps']}, Done: {log['done']} | {log['details']}"
+                )
+            else:
+                # Agent Action
+                # details: "Agent at (x,y,z) -> ACTION_NAME"
+                parts = log["details"].split(" -> ")
+                action_name = parts[1]
+                logger.info(
+                    f"  [{log['step']:3d}] AGENT ACTION {action_name:<14} → Reward: {log['reward']:+6.3f}, Agents: {log['n_agents']:3d}, Steps: {log['env_steps']}/{log['env_max_steps']}, Done: {log['done']} | {log['details']}"
+                )
 
         # --- Update Phase (PPO) ---
         b_lattices = torch.stack(batch_lattices)  # (T, B, X, Y, Z)
