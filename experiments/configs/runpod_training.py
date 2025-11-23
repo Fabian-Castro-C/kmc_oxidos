@@ -132,8 +132,11 @@ TRAINING_CONFIG = {
     # Total training budget
     "total_timesteps": 100_000_000,  # 100M steps for deep convergence on RTX 5090
     # Rollout collection
-    "num_steps": 256,  # Short rollouts for frequent updates (Batch = 4096 * 256 = 1M)
-    "num_envs": 2048,  # Reduced from 4096 to fit in 32GB VRAM (Batch = 2048 * 256 = 0.5M)
+    "num_steps": 256,  # Short rollouts for frequent updates
+    "num_envs": 256,  # Reduced to 256 to fit in VRAM (Batch = 256 * 256 = 65k)
+    # Note: Swarm architecture processes EVERY atom as an agent.
+    # 256 envs * 8000 sites = 2,048,000 agents per forward pass.
+    # This consumes ~5-6GB VRAM for activations.
     # --- NEW ---
     # Path to a checkpoint to resume training from. Set to None to train from scratch.
     # Example: "experiments/results/train/runpod_XXXXXXXXXX/models/best_model.pt"
