@@ -40,6 +40,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Global flag for graceful shutdown
+interrupted = False
+
+def signal_handler(sig, frame):
+    global interrupted
+    if not interrupted:
+        print("\n!!! Interrupción detectada (Ctrl+C). Terminando paso actual y guardando datos... !!!")
+        interrupted = True
 
 def export_to_gsf(height_profile, output_path, lattice_constant, step, roughness, coverage):
     """
@@ -229,13 +237,6 @@ def run_massive_prediction(
     )
 
     # --- GRACEFUL SHUTDOWN HANDLER ---
-    interrupted = False
-    def signal_handler(sig, frame):
-        global interrupted
-        if not interrupted:
-            print("\n!!! Interrupción detectada (Ctrl+C). Terminando paso actual y guardando datos... !!!")
-            interrupted = True
-
     signal.signal(signal.SIGINT, signal_handler)
 
     for step in range(1, steps + 1):
