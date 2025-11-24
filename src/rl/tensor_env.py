@@ -162,8 +162,12 @@ class TensorTiO2Env:
         sub = one_hot[:, 3:4]
 
         # Calculate Neighbors using physics kernel
+        ti_neighbors = torch.nn.functional.conv3d(ti, self.physics.kernel_coordination, padding=1)
         o_neighbors = torch.nn.functional.conv3d(o, self.physics.kernel_coordination, padding=1)
         sub_neighbors = torch.nn.functional.conv3d(sub, self.physics.kernel_coordination, padding=1)
+
+        # Ti-Ti: Sum(Ti * Ti_neighbors) / 2
+        e_ti_ti = (ti * ti_neighbors).sum(dim=(1, 2, 3, 4)) * 0.5 * self.params.bond_energy_ti_ti
 
         # O-O: Sum(O * O_neighbors) / 2
         e_o_o = (o * o_neighbors).sum(dim=(1, 2, 3, 4)) * 0.5 * self.params.bond_energy_o_o
