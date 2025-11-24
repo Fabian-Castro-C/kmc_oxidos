@@ -32,11 +32,11 @@ ENV_CONFIG = {
     # LOWERED TEMPERATURE FOR TRAINING VALIDATION:
     # At 600K, diffusion is 10^5x faster than deposition, so 2048 steps = 1 atom moving.
     # At 350K, diffusion is comparable to deposition, allowing film growth in 2048 steps.
-    "temperature": 600.0,  # Kelvin - Restored to paper value for correct physics
+    "temperature": 300.0,  # Kelvin - Restored to paper value for correct physics
     "deposition_flux_ti": 0.5,  # ML/s - Low flux for diffusion-dominated regime
     "deposition_flux_o": 1.0,  # ML/s - Low flux for diffusion-dominated regime
     # Episode configuration
-    "max_steps_per_episode": 512,  # Longer episodes for larger system equilibration
+    "max_steps_per_episode": 4096,  # Longer episodes for larger system equilibration
     # Random seed for reproducibility
     "seed": 4242,
 }
