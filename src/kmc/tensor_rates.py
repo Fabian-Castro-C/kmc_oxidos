@@ -51,13 +51,14 @@ class TensorRateCalculator:
 
     def calculate_diffusion_rates(self, lattice_state: torch.Tensor):
         """
-        Calculate diffusion rates for ALL atoms in the lattice simultaneously.
+        Calculate directional diffusion rates for ALL atoms in the lattice simultaneously.
 
         Args:
             lattice_state: (nx, ny, nz) OR (batch, nx, ny, nz) int8 tensor
 
         Returns:
-            rates: Same shape as input, float32 tensor of total diffusion rates
+            rates: (Batch, 6, nx, ny, nz) float32 tensor
+                   Channels: 0:X+, 1:X-, 2:Y+, 3:Y-, 4:Z+, 5:Z-
         """
         # 1. Prepare input for convolution
         # We treat any non-vacant site as "occupied" (1.0)
@@ -140,19 +141,81 @@ class TensorRateCalculator:
         # Ea = E_diff + N * E_bond_lateral
         # We use a moderate lateral bond energy (0.3 eV) to allow nucleation without freezing.
         E_bond_lateral = 0.05
-        activation_energies = base_energies + (coordination_map * E_bond_lateral)
+        
+        # Base Activation (Isotropic part)
+        E_isotropic = base_energies + (coordination_map * E_bond_lateral)
 
-        # 4. Calculate Rates (Arrhenius)
-        # Rate = nu0 * exp(-Ea / kT)
-        rates = self.nu0 * torch.exp(-activation_energies / self.kT)
+        # 4. Directional Rates with Ehrlich-Schwoebel Barrier
+        # Directions: 0:X+, 1:X-, 2:Y+, 3:Y-, 4:Z+, 5:Z-
+        # Shifts to GET the neighbor value onto the current site:
+        shifts = [
+            (-1, 0, 0), # X+1
+            (1, 0, 0),  # X-1
+            (0, -1, 0), # Y+1
+            (0, 1, 0),  # Y-1
+            (0, 0, -1), # Z+1
+            (0, 0, 1)   # Z-1
+        ]
+        
+        # Prepare tensors for directional checks
+        is_occupied_tensor = (lattice_state != SpeciesType.VACANT.value).float()
+        is_atom = (lattice_state == SpeciesType.TI.value) | (lattice_state == SpeciesType.O.value)
+        is_atom = is_atom.float()
+        
+        # "Occupied Below" for ES barrier check (Shift Z+1 to bring z-1 to z)
+        is_occupied_below = torch.roll(is_occupied_tensor, shifts=1, dims=-1)
+        # Mask Z=0 (Substrate has no "below", but we don't move substrate)
+        # Atoms at Z=1 have Z=0 (Substrate) below them -> Supported.
+        
+        rates_list = []
+        
+        for i, (dx, dy, dz) in enumerate(shifts):
+            # A. Check Target Vacancy
+            # We can only move if target is VACANT
+            # target_occ[x,y,z] = is_occupied[x+dx, y+dy, z+dz]
+            # Roll by (-dx, -dy, -dz)
+            target_occ = torch.roll(is_occupied_tensor, shifts=(dx, dy, dz), dims=(-3, -2, -1))
+            
+            # B. Ehrlich-Schwoebel Barrier Check
+            # Condition: Moving Laterally (dz=0) AND Target is NOT supported (Target-Below is Vacant)
+            # AND Current is supported (Current-Below is Occupied)
+            es_penalty = 0.0
+            if dz == 0: # Lateral move
+                # Check if target is supported
+                # target_supported = is_occupied[x+dx, y+dy, z-1]
+                target_supported = torch.roll(is_occupied_below, shifts=(dx, dy), dims=(-3, -2))
+                
+                # If NOT supported (vacant below), add penalty
+                is_step_down = (target_supported < 0.5)
+                current_supported = (is_occupied_below > 0.5)
+                
+                # Apply penalty only if we are currently supported and moving to unsupported
+                step_down_mask = current_supported & is_step_down
+                
+                penalty = torch.zeros_like(E_isotropic)
+                penalty[step_down_mask] = getattr(self.params, 'ea_es', 0.4)
+                es_penalty = penalty
 
-        # 5. Mask out vacant sites (vacant sites don't diffuse)
-        # We only want rates for actual atoms
-        atom_mask = lattice_state != SpeciesType.VACANT.value
-        rates = rates * atom_mask.float()
+            # C. Total Barrier
+            E_act = E_isotropic + es_penalty
+            
+            # D. Rate
+            rate = self.nu0 * torch.exp(-E_act / self.kT)
+            
+            # E. Mask Invalid Moves
+            # Target must be vacant
+            valid_move = (target_occ < 0.5)
+            
+            # Final Rate for this direction
+            final_rate = rate * is_atom * valid_move.float()
+            rates_list.append(final_rate)
 
-        # Replace NaNs with 0.0 (just in case)
-        rates = torch.nan_to_num(rates, nan=0.0)
+        # Stack channels: (Batch, 6, X, Y, Z)
+        rates = torch.stack(rates_list, dim=1)
+        
+        # Handle batch dimension consistency
+        if not is_batch:
+            rates = rates.squeeze(0)
 
         return rates
 

@@ -324,15 +324,10 @@ def run_massive_prediction(
         # We do this BEFORE inference to skip inference if we choose deposition.
         B, X, Y, Z = env.lattices.shape
 
-        if cached_base_rates is None:
-            base_rates = env.physics.calculate_diffusion_rates(env.lattices)
-            cached_base_rates = base_rates
-        elif dirty_indices is not None and len(dirty_indices) > 0:
-            # Partial Update of Rates (Optimized)
-            update_rates_subset(env, cached_base_rates, dirty_indices, rate_update_offsets)
-            base_rates = cached_base_rates
-        else:
-            base_rates = cached_base_rates
+        # ALWAYS recalculate rates to ensure correct physics (ES barrier, etc.)
+        # The partial update optimization was using incorrect physics formulas.
+        # base_rates shape: (B, 6, X, Y, Z)
+        base_rates = env.physics.calculate_diffusion_rates(env.lattices)
 
         total_diff_rate = base_rates.sum()
 
@@ -345,8 +340,8 @@ def run_massive_prediction(
         # KMC Selection: Deposition vs Diffusion
         # Use the same logic as train_gpu_swarm.py
         # R_diff_total is the sum of all diffusion rates in the lattice
-        # Multiply by 6.0 as an approximate upper bound for total possible moves (isotropic assumption)
-        R_diff_total = total_diff_rate * 6.0
+        # Multiply by 1.0 (exact sum now)
+        R_diff_total = total_diff_rate
 
         R_total = R_dep_total + R_diff_total
         p_dep = R_dep_total / (R_total + 1e-10)
@@ -523,24 +518,20 @@ def run_massive_prediction(
             # Action 0-5: Diffusion (use base_rates)
             # Action 6: Desorption (use much lower rate)
             
-            # Calculate Desorption Rate
-            # E_des ~ 2.0 eV vs E_diff ~ 0.6 eV -> Delta ~ 1.4 eV
-            # Rate_des = Rate_diff * exp(-DeltaE / kT)
-            # log(Rate_des) = log(Rate_diff) - DeltaE/kT
-            # DeltaE/kT ~ 1.4 / 0.052 ~ 27.0
-            # We'll subtract a large penalty from the desorption logit
+            # base_rates is (B, 6, X, Y, Z). We assume B=1.
+            # We need to flatten to (N_sites, 6)
+            # Permute to (B, X, Y, Z, 6)
+            rates_permuted = base_rates.permute(0, 2, 3, 4, 1) # (1, X, Y, Z, 6)
+            flat_diff_rates = rates_permuted.reshape(-1, 6) # (N, 6)
             
-            flat_base_rates = base_rates.view(-1, 1)
-            flat_log_rates = torch.log(flat_base_rates + 1e-10)
+            flat_log_diff_rates = torch.log(flat_diff_rates + 1e-10)
             
-            # Create a (N, 7) tensor of log rates
-            # Start with diffusion rates for all
-            all_log_rates = flat_log_rates.expand(-1, 7).clone()
+            # Desorption (Action 6)
+            # We assign a very low probability to desorption
+            log_des_rate = torch.full((flat_diff_rates.shape[0], 1), -100.0, device=device)
             
-            # Apply penalty to Desorption (Index 6)
-            # This effectively disables desorption unless the agent has a massive preference
-            # which it shouldn't.
-            all_log_rates[:, 6] -= 30.0 
+            # Combine: (N, 7)
+            all_log_rates = torch.cat([flat_log_diff_rates, log_des_rate], dim=1)
 
             guided_logits = logits + all_log_rates
 
