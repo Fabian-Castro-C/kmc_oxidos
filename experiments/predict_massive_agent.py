@@ -795,9 +795,18 @@ def run_massive_prediction(
 
                 # Save PNG snapshot
                 fig, ax = plt.subplots(figsize=(8, 7))
-                im = ax.imshow(h_np, cmap="viridis", interpolation="nearest")
-                ax.set_xlabel("X", fontsize=11)
-                ax.set_ylabel("Y", fontsize=11)
+                
+                # Tiling for periodic visualization (2x2)
+                h_tiled = np.tile(h_np, (2, 2))
+                
+                im = ax.imshow(h_tiled, cmap="viridis", interpolation="nearest")
+                
+                # Draw lines to show boundaries
+                ax.axvline(x=h_np.shape[1]-0.5, color='white', linestyle='--', alpha=0.5)
+                ax.axhline(y=h_np.shape[0]-0.5, color='white', linestyle='--', alpha=0.5)
+                
+                ax.set_xlabel("X (Tiled 2x2)", fontsize=11)
+                ax.set_ylabel("Y (Tiled 2x2)", fontsize=11)
                 ax.set_title(
                     f"Step {step}: R={rms * env.params.lattice_constant_a:.2f}Å, θ={coverage:.3f}",
                     fontsize=12,
@@ -920,10 +929,14 @@ def run_massive_prediction(
     height_map = occupied_z.max(dim=2).values.float().cpu().numpy()
 
     plt.figure(figsize=(8, 7))
-    plt.imshow(height_map, cmap="viridis", interpolation="nearest")
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.title("Final Height Profile")
+    # Tiling for final plot too
+    h_tiled = np.tile(height_map, (2, 2))
+    plt.imshow(h_tiled, cmap="viridis", interpolation="nearest")
+    plt.axvline(x=height_map.shape[1]-0.5, color='white', linestyle='--', alpha=0.5)
+    plt.axhline(y=height_map.shape[0]-0.5, color='white', linestyle='--', alpha=0.5)
+    plt.xlabel("X (Tiled 2x2)")
+    plt.ylabel("Y (Tiled 2x2)")
+    plt.title("Final Height Profile (Periodic View)")
     plt.colorbar(label="Height (layers)")
     plt.savefig(output_dir / "height_profile.png")
     plt.close()

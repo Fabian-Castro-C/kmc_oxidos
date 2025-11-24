@@ -241,9 +241,10 @@ def train_gpu_swarm():
             batch_lattices.append(env.lattices.clone())
 
             # 1. Calculate Physics Rates
+            # base_rates shape: (B, 6, X, Y, Z)
             base_rates = env.physics.calculate_diffusion_rates(env.lattices)
-            total_diff_rates = base_rates.sum(dim=(1, 2, 3))  # (B,)
-            R_diff_total = total_diff_rates * 6.0  # Approx upper bound
+            total_diff_rates = base_rates.sum(dim=(1, 2, 3, 4))  # Sum over (6, X, Y, Z) -> (B,)
+            R_diff_total = total_diff_rates # Exact sum now
 
             # 2. Deposition vs Diffusion Competition
             R_total = R_dep_total + R_diff_total
@@ -276,8 +277,17 @@ def train_gpu_swarm():
                 values = critic(global_features, agent_obs)
 
             # 4. Action Selection (Physics-Guided)
-            flat_base_rates = base_rates.view(-1, 1)
-            flat_log_rates = torch.log(flat_base_rates + 1e-10)
+            # base_rates: (B, 6, X, Y, Z) -> Permute to (B, X, Y, Z, 6) -> Reshape to (B*XYZ, 6)
+            flat_diff_rates = base_rates.permute(0, 2, 3, 4, 1).reshape(-1, 6)
+            flat_log_diff_rates = torch.log(flat_diff_rates + 1e-10)
+            
+            # Add Desorption Rate (Action 6) - Very low probability
+            # Shape: (B*XYZ, 1)
+            log_des_rate = torch.full((flat_diff_rates.shape[0], 1), -100.0, device=device)
+            
+            # Combine: (B*XYZ, 7)
+            flat_log_rates = torch.cat([flat_log_diff_rates, log_des_rate], dim=1)
+            
             guided_logits = logits + flat_log_rates
 
             # Mask Vacant Sites
@@ -576,7 +586,14 @@ def train_gpu_swarm():
                 # We need base_rates for the *stored* lattices.
                 # env.physics.calculate_diffusion_rates is fast enough?
                 mb_base_rates = env.physics.calculate_diffusion_rates(mb_lattices)
-                mb_flat_log_rates = torch.log(mb_base_rates.view(-1, 1) + 1e-10)
+                
+                # Reshape: (MB, 6, X, Y, Z) -> (MB, X, Y, Z, 6) -> (MB*XYZ, 6)
+                mb_flat_diff_rates = mb_base_rates.permute(0, 2, 3, 4, 1).reshape(-1, 6)
+                mb_flat_log_diff_rates = torch.log(mb_flat_diff_rates + 1e-10)
+                
+                # Add Desorption
+                mb_log_des = torch.full((mb_flat_diff_rates.shape[0], 1), -100.0, device=device)
+                mb_flat_log_rates = torch.cat([mb_flat_log_diff_rates, mb_log_des], dim=1)
 
                 guided_logits = new_logits + mb_flat_log_rates
 
